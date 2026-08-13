@@ -82,7 +82,8 @@ async fn panic_in_future_delivers_nothing() {
 /// A restart does not cancel a piped future: its output is received by the new state.
 #[tokio::test]
 async fn restarted_actor_receives_output() {
-    let backoff = Backoff::new(Duration::ZERO, Duration::ZERO).expect("zero bounds are ordered");
+    let backoff = Backoff::new(Duration::from_millis(1), Duration::from_millis(1))
+        .expect("the bounds are valid");
     let config = ActorConfig::default().with_supervision_strategy(SupervisionStrategy::Restart(
         RestartPolicy::new(NonZeroU32::MIN).with_backoff(backoff),
     ));

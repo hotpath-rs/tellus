@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- add shared, versioned remoting reachability observations
+- borrow static persistence manifests through `Cow<'static, str>`
+
+### Fixed
+
+- fail fenced lookups and clean up frames cancelled with a lost connection
+- cache final outbound admission failures instead of redialing per message
+- tolerate stale SRV targets when another target resolves
+
+### Performance
+
+- serialize frame payloads as byte slices and remove avoidable remoting hot-path locking and hashing
+
 ## [0.3.9](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.8...tellus-v0.3.9) - 2026-10-19
 
 ### Other

@@ -1,0 +1,80 @@
+# The manifests of the "Run on Kubernetes" how-to guide, for the how_to_run_on_kubernetes example.
+# ANCHOR: rbac
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tellus
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tellus-seeds
+rules:
+  - apiGroups: [ "" ]
+    resources: [ pods ]
+    verbs: [ list ]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tellus-seeds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tellus-seeds
+subjects:
+  - kind: ServiceAccount
+    name: tellus
+    namespace: default
+# ANCHOR_END: rbac
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tellus
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tellus
+  template:
+    metadata:
+      labels:
+        app: tellus
+    spec:
+      # ANCHOR: pod
+      serviceAccountName: tellus
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: node
+          image: my-tellus-app:1.0.0
+          ports:
+            - name: tellus
+              containerPort: 7878
+              protocol: UDP
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: ADVERTISED_ADDR
+              value: "$(POD_IP):7878"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 2
+            failureThreshold: 2
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/tellus/tls
+              readOnly: true
+      # ANCHOR_END: pod
+      volumes:
+        - name: tls
+          emptyDir: {}
