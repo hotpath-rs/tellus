@@ -5,6 +5,7 @@ version       = "0.2.2"
 edition       = { workspace = true }
 license       = { workspace = true }
 readme        = "README.md"
+homepage      = { workspace = true }
 repository    = { workspace = true }
 documentation = "https://docs.rs/tellus-persistence-postgres/latest/tellus_persistence_postgres/"
 publish       = true
