@@ -6,8 +6,8 @@ default-members = [ "tellus", "tellus-persistence-postgres" ]
 [workspace.package]
 edition       = "2024"
 license       = "Apache-2.0"
-repository    = "https://github.com/hseeberger/tellus"
-documentation = "https://github.com/hseeberger/tellus"
+repository    = "https://github.com/tellus-rs/tellus"
+documentation = "https://github.com/tellus-rs/tellus"
 publish       = false
 
 [workspace.dependencies]

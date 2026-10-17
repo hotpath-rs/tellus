@@ -20,7 +20,7 @@ Results are written to `target/criterion-comparison`, deliberately separate from
 `target/criterion` tree used by tellus's own regression benchmarks, so the two never mix.
 
 Runs published by CI are collected on the
-[comparison dashboard](https://hseeberger.github.io/tellus/comparison/), one directory per version
+[comparison dashboard](https://tellus-rs.github.io/tellus/comparison/), one directory per version
 tag and per manual run.
 
 ## Benchmarks

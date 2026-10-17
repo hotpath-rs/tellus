@@ -11,16 +11,16 @@
 
 [crates-badge]: https://img.shields.io/crates/v/tellus
 [crates-url]: https://crates.io/crates/tellus
-[license-badge]: https://img.shields.io/github/license/hseeberger/tellus
-[license-url]: https://github.com/hseeberger/tellus/blob/main/LICENSE
-[build-badge]: https://img.shields.io/github/actions/workflow/status/hseeberger/tellus/ci.yml
-[build-url]: https://github.com/hseeberger/tellus/actions/workflows/ci.yml
+[license-badge]: https://img.shields.io/github/license/tellus-rs/tellus
+[license-url]: https://github.com/tellus-rs/tellus/blob/main/LICENSE
+[build-badge]: https://img.shields.io/github/actions/workflow/status/tellus-rs/tellus/ci.yml
+[build-url]: https://github.com/tellus-rs/tellus/actions/workflows/ci.yml
 [docs-badge]: https://img.shields.io/docsrs/tellus/latest
 [docs-url]: https://docs.rs/tellus/latest/tellus/
 [benchmarks-badge]: https://img.shields.io/badge/benchmarks-dashboard-informational
-[benchmarks-url]: https://hseeberger.github.io/tellus/dev/bench/
+[benchmarks-url]: https://tellus-rs.github.io/tellus/dev/bench/
 [comparison-badge]: https://img.shields.io/badge/comparison-dashboard-informational
-[comparison-url]: https://hseeberger.github.io/tellus/comparison/
+[comparison-url]: https://tellus-rs.github.io/tellus/comparison/
 
 An actor framework for Rust, built on [Tokio](https://tokio.rs): typed messages, supervision
 trees, death watch with an ordering guarantee and optional event-sourced persistence. Inspired by
