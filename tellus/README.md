@@ -18,9 +18,9 @@
 [docs-badge]: https://img.shields.io/docsrs/tellus/latest
 [docs-url]: https://docs.rs/tellus/latest/tellus/
 [benchmarks-badge]: https://img.shields.io/badge/benchmarks-dashboard-informational
-[benchmarks-url]: https://tellus-rs.github.io/tellus/dev/bench/
+[benchmarks-url]: https://tellus.rs/tellus/dev/bench/
 [comparison-badge]: https://img.shields.io/badge/comparison-dashboard-informational
-[comparison-url]: https://tellus-rs.github.io/tellus/comparison/
+[comparison-url]: https://tellus.rs/tellus/comparison/
 
 An actor framework for Rust, built on [Tokio](https://tokio.rs): typed messages, supervision
 trees, death watch with an ordering guarantee and optional event-sourced persistence. Inspired by
