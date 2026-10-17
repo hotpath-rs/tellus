@@ -65,7 +65,7 @@ jobs:
           components: rustfmt
 
       - name: Install just
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: just
 
@@ -91,7 +91,7 @@ jobs:
           components: clippy
 
       - name: Install just and cargo-hack
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: just,cargo-hack
 
@@ -117,7 +117,7 @@ jobs:
           toolchain: ${{ needs.toolchain.outputs.stable }}
 
       - name: Install just
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: just
 
@@ -144,7 +144,7 @@ jobs:
           components: rust-docs
 
       - name: Install just
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: just
 
