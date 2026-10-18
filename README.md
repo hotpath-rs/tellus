@@ -1,4 +1,9 @@
-# tellus
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://tellus.rs/brand/lockup-dark.svg">
+    <img alt="tellus" src="https://tellus.rs/brand/lockup.svg" height="56">
+  </picture>
+</h1>
 
 **Actors for Rust, on solid ground.**
 
@@ -25,7 +30,7 @@
 An actor framework for Rust, built on [Tokio](https://tokio.rs): typed messages, supervision
 trees, death watch with an ordering guarantee and optional event-sourced persistence. Inspired by
 Carl Hewitt's [Actor Model](https://en.wikipedia.org/wiki/Actor_model) and strongly influenced by
-[Akka](https://akka.io).
+Akka, continued as open source by [Apache Pekko](https://pekko.apache.org).
 
 tellus is available on [crates.io](https://crates.io/crates/tellus):
 

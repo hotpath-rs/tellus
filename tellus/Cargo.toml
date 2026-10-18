@@ -46,6 +46,34 @@ tracing-subscriber = { workspace = true, features = [ "env-filter", "fmt", "json
 tokio              = { workspace = true, features = [ "macros", "rt-multi-thread", "test-util", "time" ] }
 
 [[example]]
+name = "getting_started_01_hello"
+path = "examples/tutorials/getting_started/01_hello.rs"
+
+[[example]]
+name = "getting_started_02_device"
+path = "examples/tutorials/getting_started/02_device.rs"
+
+[[example]]
+name = "getting_started_03_group"
+path = "examples/tutorials/getting_started/03_group.rs"
+
+[[example]]
+name = "getting_started_04_watch"
+path = "examples/tutorials/getting_started/04_watch.rs"
+
+[[example]]
+name = "getting_started_05_query"
+path = "examples/tutorials/getting_started/05_query.rs"
+
+[[example]]
+name = "getting_started_06_supervision"
+path = "examples/tutorials/getting_started/06_supervision.rs"
+
+[[example]]
+name = "getting_started_07_device_manager"
+path = "examples/tutorials/getting_started/07_device_manager.rs"
+
+[[example]]
 name              = "profile"
 required-features = [ "hotpath" ]
 
