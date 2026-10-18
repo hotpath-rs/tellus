@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.3...tellus-v0.3.4) - 2026-10-18
+
+### Added
+
+- add ActorContext::pipe_to_self
+
+### Other
+
+- drop blank lines before a closing Ok
+
 ## [0.3.3](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.2...tellus-v0.3.3) - 2026-10-18
 
 ### Other
