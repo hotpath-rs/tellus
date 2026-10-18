@@ -75,7 +75,6 @@ impl Actor for Manager {
             );
             context.watch(&worker);
         }
-
         Ok(Managing {
             jobs: DOCUMENTS.to_vec(),
             workers: WORKERS,
@@ -149,7 +148,6 @@ impl Actor for Worker {
                 println!("## {words} words in: {document}");
 
                 self.request_job(context);
-
                 Ok(Control::Continue(state))
             }
 
