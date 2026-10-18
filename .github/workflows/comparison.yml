@@ -123,18 +123,13 @@ jobs:
           cp target/comparison-report/index.html "../gh-pages/comparison/$TAG/"
           cp target/comparison-report/results.json "../gh-pages/comparison/$TAG/"
 
-          {
-            printf '<!doctype html>\n<html lang="en">\n<head>\n'
-            printf '<meta charset="utf-8">\n<title>tellus comparison benchmarks</title>\n'
-            printf '</head>\n<body>\n<h1>tellus comparison benchmarks</h1>\n<ul>\n'
-            find ../gh-pages/comparison -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
-              | sort -Vr \
-              | while read -r dir; do
-                  printf '<li><a href="./%s/">%s</a></li>\n' "$dir" "$dir"
-                done
-            printf '</ul>\n<p><a href="../dev/bench/">Regression benchmarks over time</a></p>\n'
-            printf '</body>\n</html>\n'
-          } > ../gh-pages/comparison/index.html
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            mkdir -p ../gh-pages/comparison/latest
+            cp target/comparison-report/index.html target/comparison-report/results.json \
+              ../gh-pages/comparison/latest/
+          fi
+
+          cargo run -p tellus-comparison --bin report -- --index ../gh-pages/comparison
 
           git -C ../gh-pages add comparison
           if git -C ../gh-pages diff --cached --quiet; then
