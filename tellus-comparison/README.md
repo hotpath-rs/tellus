@@ -21,7 +21,15 @@ Results are written to `target/criterion-comparison`, deliberately separate from
 
 Runs published by CI are collected on the
 [comparison dashboard](https://tellus.rs/tellus/comparison/), one directory per version
-tag and per manual run.
+tag and per manual run; [`latest`](https://tellus.rs/tellus/comparison/latest/) holds a copy of
+the run for the most recent version tag. The pages take their look from `dashboards.css` on
+tellus.rs. To re-render a published run from its `results.json`, for example after changing the
+page layout, and to regenerate the overview page:
+
+```shell
+cargo run -p tellus-comparison --bin report -- --from-json <run>/results.json --output <run>
+cargo run -p tellus-comparison --bin report -- --index <comparison>
+```
 
 ## Benchmarks
 

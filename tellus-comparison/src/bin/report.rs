@@ -1,7 +1,8 @@
 use anyhow::{Context, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    cmp::Reverse,
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
@@ -10,25 +11,42 @@ use std::{
 };
 
 const PACKAGES: [&str; 3] = ["kameo", "ractor", "tellus"];
+const LATEST: &str = "latest";
+const HEADER: &str = r#"<header class="top"><div class="wrap">
+<a class="brand" href="https://tellus.rs/" aria-label="tellus home"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M2.33 13h27.35" stroke="currentColor" stroke-width="2.5"/><path d="M2.44 19.5h27.11M5.45 25.2h21.11" stroke="var(--accent)" stroke-width="2.5"/><circle cx="16" cy="16" r="14" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>tellus</a>
+<nav class="nav" aria-label="Main"><a href="https://tellus.rs/docs/">Docs</a><a href="https://tellus.rs/tellus/comparison/" aria-current="page">Comparison</a><a href="https://tellus.rs/tellus/dev/bench/">Regression benchmarks</a><a href="https://github.com/tellus-rs/tellus">GitHub</a></nav>
+</div></header>"#;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::from_env()?;
 
-    let measurements = read_measurements(&args.input)?;
-    if measurements.is_empty() {
-        bail!("no criterion results below {}", args.input.display());
+    if let Some(directory) = &args.index {
+        return write_index(directory);
     }
 
-    let report = Report {
-        metadata: read_metadata(args.tag)?,
-        measurements,
+    let report = match &args.from_json {
+        Some(path) => read_report(path)?,
+
+        None => {
+            let measurements = read_measurements(&args.input)?;
+            if measurements.is_empty() {
+                bail!("no criterion results below {}", args.input.display());
+            }
+            Report {
+                metadata: read_metadata(args.tag)?,
+                measurements,
+            }
+        }
     };
 
     fs::create_dir_all(&args.output)
         .with_context(|| format!("output directory {}", args.output.display()))?;
 
-    let json = serde_json::to_string_pretty(&report).context("report as JSON")?;
-    fs::write(args.output.join("results.json"), json).context("results.json")?;
+    // Rewriting a read results.json would change the last digit of some floats.
+    if args.from_json.is_none() {
+        let json = serde_json::to_string_pretty(&report).context("report as JSON")?;
+        fs::write(args.output.join("results.json"), json).context("results.json")?;
+    }
     fs::write(args.output.join("index.html"), render_html(&report)).context("index.html")?;
 
     println!(
@@ -45,6 +63,8 @@ struct Args {
     input: PathBuf,
     output: PathBuf,
     tag: String,
+    from_json: Option<PathBuf>,
+    index: Option<PathBuf>,
 }
 
 impl Args {
@@ -54,6 +74,8 @@ impl Args {
         let mut input = workspace.join("target/criterion-comparison");
         let mut output = workspace.join("target/comparison-report");
         let mut tag = env::var("GITHUB_REF_NAME").unwrap_or_else(|_| "local".to_string());
+        let mut from_json = None;
+        let mut index = None;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -63,21 +85,29 @@ impl Args {
                 "--input" => input = PathBuf::from(value()?),
                 "--output" => output = PathBuf::from(value()?),
                 "--tag" => tag = value()?,
+                "--from-json" => from_json = Some(PathBuf::from(value()?)),
+                "--index" => index = Some(PathBuf::from(value()?)),
                 _ => bail!("unexpected argument {arg}"),
             }
         }
 
-        Ok(Args { input, output, tag })
+        Ok(Args {
+            input,
+            output,
+            tag,
+            from_json,
+            index,
+        })
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Report {
     metadata: Metadata,
     measurements: Vec<Measurement>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Metadata {
     tag: String,
     commit: Option<String>,
@@ -89,7 +119,7 @@ struct Metadata {
     versions: BTreeMap<String, String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Measurement {
     group: String,
     framework: String,
@@ -105,6 +135,100 @@ impl Measurement {
     fn key(&self) -> (&str, Option<&str>) {
         (&self.group, self.parameter.as_deref())
     }
+}
+
+fn write_index(directory: &Path) -> anyhow::Result<()> {
+    let mut runs = fs::read_dir(directory)
+        .with_context(|| format!("reading directory {}", directory.display()))?
+        .map(|entry| {
+            let path = entry
+                .with_context(|| format!("entry below {}", directory.display()))?
+                .path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .with_context(|| format!("name of {}", path.display()))?
+                .to_string();
+            Ok((name, path))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(name, path)| name != LATEST && path.join("results.json").is_file())
+        .map(|(name, path)| Ok((name, read_report(&path.join("results.json"))?.metadata)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    runs.sort_by(|(a, _), (b, _)| run_order(a).cmp(&run_order(b)));
+
+    let latest_path = directory.join(LATEST).join("results.json");
+    let latest = if latest_path.is_file() {
+        Some(read_report(&latest_path)?.metadata)
+    } else {
+        None
+    };
+
+    let latest_item = latest
+        .map(|metadata| {
+            format!(
+                r#"<li><a href="./{LATEST}/"><span class="latest">latest</span><span class="note">{tag}, {date}</span></a></li>"#,
+                tag = escape(&metadata.tag),
+                date = escape(day(metadata.date.as_deref())),
+            )
+        })
+        .unwrap_or_default();
+    let items = runs
+        .iter()
+        .map(|(name, metadata)| {
+            format!(
+                r#"<li><a href="./{name}/"><span>{name}</span><span class="note">{date}</span></a></li>"#,
+                name = escape(name),
+                date = escape(day(metadata.date.as_deref())),
+            )
+        })
+        .collect::<String>();
+
+    let body = format!(
+        r#"<p class="eyebrow">Benchmarks</p>
+<h1>tellus comparison benchmarks</h1>
+<p class="lede">Messaging throughput of tellus against kameo and ractor, one run per release.</p>
+<ul class="runs">{latest_item}{items}</ul>
+<div class="foot"><span>See the <a href="../dev/bench/">regression benchmarks</a> for tellus's own throughput over time.</span></div>
+"#
+    );
+
+    let path = directory.join("index.html");
+    fs::write(&path, page("tellus comparison benchmarks", &body))
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+fn read_report(path: &Path) -> anyhow::Result<Report> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&contents).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn run_order(name: &str) -> RunOrder<'_> {
+    let version = name.strip_prefix("tellus-v").and_then(|version| {
+        version
+            .split('.')
+            .map(|part| part.parse::<u64>().ok())
+            .collect::<Option<Vec<_>>>()
+    });
+
+    match version {
+        Some(version) => RunOrder::Release(Reverse(version)),
+        None => RunOrder::Other(Reverse(name)),
+    }
+}
+
+// Derived `Ord` compares by variant first, hence releases sort before other runs.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum RunOrder<'a> {
+    Release(Reverse<Vec<u64>>),
+    Other(Reverse<&'a str>),
+}
+
+fn day(date: Option<&str>) -> &str {
+    date.and_then(|date| date.get(..10))
+        .unwrap_or("unknown date")
 }
 
 fn read_measurements(input: &Path) -> anyhow::Result<Vec<Measurement>> {
@@ -317,47 +441,10 @@ fn render_html(report: &Report) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tellus comparison benchmarks ({tag})</title>
-<style>
-:root {{ color-scheme: light dark; --fg: #111; --muted: #555; --bg: #fff; --line: #ddd; --bar: #4f7cff; --warn-bg: #fff8e1; --warn-line: #e6c200; }}
-@media (prefers-color-scheme: dark) {{
-  :root {{ --fg: #e6e6e6; --muted: #a0a0a0; --bg: #14161a; --line: #333; --bar: #6d92ff; --warn-bg: #2a2413; --warn-line: #7a6a1a; }}
-}}
-* {{ box-sizing: border-box; }}
-body {{ margin: 0 auto; padding: 2rem 1rem; max-width: 60rem; background: var(--bg); color: var(--fg);
-  font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }}
-h1 {{ font-size: 1.6rem; margin: 0 0 .25rem; }}
-h2 {{ font-size: 1.15rem; margin: 2.5rem 0 .75rem; }}
-a {{ color: inherit; }}
-.sub {{ color: var(--muted); margin: 0 0 1.5rem; }}
-.meta {{ display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; padding: 1rem;
-  border: 1px solid var(--line); border-radius: 8px; font-size: .9rem; }}
-.meta dt {{ color: var(--muted); }}
-.meta dd {{ margin: 0; overflow-wrap: anywhere; }}
-.caveats {{ margin: 1.5rem 0; padding: 1rem 1rem 1rem 1.25rem; background: var(--warn-bg);
-  border-left: 4px solid var(--warn-line); border-radius: 4px; font-size: .92rem; }}
-.caveats h2 {{ margin: 0 0 .5rem; font-size: 1rem; }}
-.caveats ol {{ margin: 0; padding-left: 1.1rem; }}
-.caveats li {{ margin: .4rem 0; }}
-.scroll {{ overflow-x: auto; }}
-table {{ border-collapse: collapse; width: 100%; font-size: .92rem; }}
-th, td {{ text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); white-space: nowrap; }}
-th {{ color: var(--muted); font-weight: 600; }}
-td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-.bar {{ display: block; height: .55rem; background: var(--bar); border-radius: 3px; min-width: 2px; }}
-td.barcell {{ width: 40%; }}
-footer {{ margin-top: 3rem; color: var(--muted); font-size: .85rem; }}
-</style>
-</head>
-<body>
-<h1>tellus comparison benchmarks</h1>
-<p class="sub">Messaging throughput of <strong>tellus</strong> against kameo and ractor, higher is better.</p>
+    let body = format!(
+        r#"<p class="eyebrow">Comparison benchmarks, {tag}</p>
+<h1>tellus against kameo and ractor</h1>
+<p class="lede">Messaging throughput, higher is better.</p>
 
 <dl class="meta">
 <dt>Tag</dt><dd>{tag}</dd>
@@ -390,12 +477,7 @@ repository; corrections are welcome.</li>
 </ol>
 </div>
 {sections}
-<footer>
-Generated from criterion results. See the
-<a href="../../dev/bench/">tellus regression benchmarks</a> for throughput over time.
-</footer>
-</body>
-</html>
+<div class="foot"><span>Generated from criterion results.</span><span><a href="../">All runs</a> &middot; <a href="../../dev/bench/">Regression benchmarks</a></span></div>
 "#,
         tag = escape(&metadata.tag),
         commit = escape(or_unknown(metadata.commit.as_deref())),
@@ -407,6 +489,11 @@ Generated from criterion results. See the
             .map_or_else(|| "unknown".to_string(), |cores| cores.to_string()),
         os = escape(or_unknown(metadata.os.as_deref())),
         rustc = escape(or_unknown(metadata.rustc.as_deref())),
+    );
+
+    page(
+        &format!("tellus comparison benchmarks ({})", escape(&metadata.tag)),
+        &body,
     )
 }
 
@@ -432,7 +519,12 @@ fn render_section(group: &str, parameter: Option<&str>, measurements: &[Measurem
             let width = relative * 100.0;
 
             format!(
-                r#"<tr><td>{framework}</td><td class="num">{mean:.3} ms</td><td class="num">{throughput:.2} M/s</td><td class="num">{relative:.2}x</td><td class="barcell"><span class="bar" style="width:{width:.1}%"></span></td></tr>"#,
+                r#"<tr{own}><td>{framework}</td><td class="num">{mean:.3} ms</td><td class="num">{throughput:.2} M/s</td><td class="num">{relative:.2}x</td><td class="barcell"><span class="bar" style="width:{width:.1}%"></span></td></tr>"#,
+                own = if measurement.framework == "tellus" {
+                    r#" class="own""#
+                } else {
+                    ""
+                },
                 framework = escape(&measurement.framework),
                 mean = measurement.mean_ns / 1e6,
                 throughput = measurement.elements_per_second / 1e6,
@@ -448,6 +540,27 @@ fn render_section(group: &str, parameter: Option<&str>, measurements: &[Measurem
 </table></div>
 "#,
         heading = escape(&heading),
+    )
+}
+
+fn page(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<link rel="icon" href="https://tellus.rs/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://tellus.rs/dashboards.css">
+</head>
+<body>
+{HEADER}
+<main class="wrap">
+{body}</main>
+</body>
+</html>
+"#
     )
 }
 
@@ -481,4 +594,5 @@ fn escape(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
