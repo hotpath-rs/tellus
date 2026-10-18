@@ -20,7 +20,7 @@ use std::{
 use tokio::{
     select,
     sync::watch,
-    task,
+    task::{self, consume_budget},
     time::{Instant, sleep},
 };
 use tracing::{debug, error};
@@ -213,6 +213,8 @@ impl Display for PanicPayload<'_> {
 macro_rules! next_incoming {
     ($actor_id:expr, $mailbox:expr, $context:expr, $stopped_by_parent:expr) => {
         'next_incoming: loop {
+            consume_budget().await;
+
             let incoming = tokio::select! {
                 biased;
 

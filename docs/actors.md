@@ -227,7 +227,11 @@ Both `init` and `receive` run under `catch_unwind`, so a panic is handled exactl
 error: logged with the actor ID and fed to supervision. An error is logged with its source as a
 separate field, so a wrapped cause stays queryable instead of being flattened into the message.
 The biased select ensures a stop signal is honored before further queued messages once the parent
-is stopping.
+is stopping. Before each wait, the loop consumes one unit of Tokio's cooperative budget
+(`consume_budget`). A mailbox which never runs empty would otherwise keep the actor's task ready
+forever, since flume is not part of that budget: once the budget is used up, the actor yields its
+worker, so other tasks, timers and its own stop signal get to run, also on a current-thread
+runtime.
 
 ## Stopping and termination
 
