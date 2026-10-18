@@ -90,7 +90,7 @@ messages (see death watch below).
 
 `receive` is synchronous and an actor cannot be stopped while it is running, which also blocks a
 Tokio worker: a `receive` which never completes keeps all ancestors from terminating. For long
-running or blocking work, spawn a task and send its result back via `tell`.
+running or blocking work, pipe a future to the actor itself (see piping futures below).
 
 ## The actor tree
 
@@ -165,6 +165,26 @@ a dead letter if the asker has terminated or its mailbox is full.
 Supervision composes with the retained mailbox: a request queued behind a failing message
 survives a restart and is answered by the restarted state, while a request consumed by the
 failing `receive` itself is not redelivered and hence resolves as `NoReply`.
+
+## Piping futures
+
+[`ActorContext::pipe_to_self`](../tellus/src/actor_context.rs) is how an actor uses async code
+without awaiting: it spawns the given future on a new Tokio task and, once the future is ready,
+delivers its output to the actor itself, converted into its message type by the given function,
+just like `reply_to`. The actor keeps handling messages meanwhile. Blocking work fits the same
+mould: the `JoinHandle` of `tokio::task::spawn_blocking` is itself a future to pipe.
+
+The output takes the same path as a tell to this actor: it counts against a bounded capacity and
+becomes a dead letter if the actor has terminated or its mailbox is full. The task is not tied to
+the actor's lifecycle: stopping does not cancel it, since cancelling at an `await` could cut an
+operation in half, and after a restart its output is received by the new state, like any message
+queued in the retained mailbox. An actor which must tell outputs of an earlier incarnation apart
+gives each request an identifier and keeps the open ones in its state.
+
+Polls of the future and the conversion run under `catch_unwind`, the shared
+`catch_panic_and_log_async`: a panic is logged at error level with the actor ID, and no message is
+delivered. A panic must not vanish silently with a discarded `JoinHandle`, else the actor would
+wait for an output which never comes.
 
 ## Mailboxes
 
@@ -456,8 +476,8 @@ has to wait for the actor, since `tell` returns before the message is handled.
   are logged, not returned.
 - Messages from one sender arrive in send order; terminated signals are ordered behind the
   watched actor's delivered messages and prove its destructors have run.
-- `receive` is synchronous and cannot await; long running or blocking work belongs in a
-  spawned task reporting back via `tell`.
+- `receive` is synchronous and cannot await; long running or blocking work runs in a future
+  piped to the actor via `pipe_to_self`, whose output arrives as a message, at most once.
 - Request-response is at-most-once too: `ask` resolves exactly once, with the reply or an error,
   at the latest when its timeout elapses, and never redelivers; a `reply_to` reply is an ordinary
   send, dropped as a dead letter if the asker is gone or its bounded mailbox is full.

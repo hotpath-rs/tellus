@@ -10,10 +10,11 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt::{self, Display, Formatter},
-    future::Future,
+    future::{Future, poll_fn},
     mem,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::{Pin, pin},
+    task::Poll,
     time::Duration,
 };
 use tokio::{
@@ -91,6 +92,38 @@ impl<M> ActorContext<M> {
     {
         let actor_ref = self.self_ref().clone();
         ReplyTo::new(move |reply| actor_ref.tell(into_message(reply)))
+    }
+
+    /// Run the given future on a new Tokio task and deliver its output to this actor as an
+    /// ordinary message, converted by the given function, typically an enum variant constructor.
+    /// This is how an actor uses async code without awaiting: it keeps handling messages while
+    /// the future runs, and the output arrives via [Actor::receive] like any other message.
+    ///
+    /// The message takes the same path as an [ActorRef::tell] to this actor: it counts against a
+    /// bounded mailbox capacity and is dropped and logged as a dead letter if this actor has
+    /// terminated or its mailbox is full. The future is not cancelled when this actor stops or
+    /// restarts; after a restart, its message is received by the new state. A panic in the future
+    /// or in the conversion is logged at error level, and no message is delivered.
+    ///
+    /// # Panics
+    /// Panics if called outside of a Tokio runtime.
+    pub fn pipe_to_self<F, G>(&self, future: F, into_message: G)
+    where
+        F: Future + Send + 'static,
+        G: FnOnce(F::Output) -> M + Send + 'static,
+        M: Send + 'static,
+    {
+        let actor_ref = self.self_ref().clone();
+
+        task::spawn(async move {
+            let actor_id = actor_ref.actor_id();
+            let piped = async move { into_message(future.await) };
+            if let Some(message) =
+                catch_panic_and_log_async(actor_id, "piped future failed", piped).await
+            {
+                actor_ref.tell(message);
+            }
+        });
     }
 
     /// Watch another actor, i.e. receive an [Incoming::Terminated] signal once that actor has
@@ -315,6 +348,41 @@ where
             None
         }
     }
+}
+
+pub(crate) async fn catch_panic_and_log_async<T, Fut>(
+    actor_id: ActorId,
+    failure: &str,
+    fut: Fut,
+) -> Option<T>
+where
+    Fut: Future<Output = T>,
+{
+    match catch_unwind_async(fut).await {
+        Ok(value) => Some(value),
+
+        Err(panic) => {
+            error!(%actor_id, panic = %PanicPayload(panic.as_ref()), "{failure}");
+            None
+        }
+    }
+}
+
+// Only polls are caught: `fut` must be a local async fn or async block, whose construction cannot
+// run the code it guards.
+pub(crate) async fn catch_unwind_async<T, Fut>(fut: Fut) -> Result<T, Box<dyn Any + Send>>
+where
+    Fut: Future<Output = T>,
+{
+    let mut fut = pin!(fut);
+
+    poll_fn(
+        |cx| match catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
+            Ok(poll) => poll.map(Ok),
+            Err(panic) => Poll::Ready(Err(panic)),
+        },
+    )
+    .await
 }
 
 /// A panic escaping the destructor must not unwind the task.

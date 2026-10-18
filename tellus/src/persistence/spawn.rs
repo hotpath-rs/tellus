@@ -2,7 +2,8 @@ use crate::{
     ActorConfig, ActorContext, ActorId, ActorRef, ActorSystem,
     actor_context::{
         PanicPayload, STATE_FAILED_TO_DROP, await_restart, catch_and_log, catch_panic_and_log,
-        drop_containing_panic, next_incoming, terminate,
+        catch_panic_and_log_async, catch_unwind_async, drop_containing_panic, next_incoming,
+        terminate,
     },
     actor_ref::SelfRef,
     actor_system::watch_root,
@@ -23,12 +24,10 @@ use crate::{
 use std::{
     any::Any,
     error::Error,
-    future::{Future, poll_fn},
     num::NonZeroUsize,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::pin,
     sync::Arc,
-    task::Poll,
 };
 use thiserror::Error;
 use tokio::{select, sync::watch, task, time::Instant};
@@ -540,37 +539,6 @@ where
             None
         }
     }
-}
-
-async fn catch_panic_and_log_async<T, Fut>(actor_id: ActorId, failure: &str, fut: Fut) -> Option<T>
-where
-    Fut: Future<Output = T>,
-{
-    match catch_unwind_async(fut).await {
-        Ok(value) => Some(value),
-
-        Err(panic) => {
-            error!(%actor_id, panic = %PanicPayload(panic.as_ref()), "{failure}");
-            None
-        }
-    }
-}
-
-// A store panic must not unwind the task past `terminate`. Only polls are caught: `fut` must be
-// a local async fn or async block, whose construction cannot run store code.
-async fn catch_unwind_async<T, Fut>(fut: Fut) -> Result<T, Box<dyn Any + Send>>
-where
-    Fut: Future<Output = T>,
-{
-    let mut fut = pin!(fut);
-
-    poll_fn(
-        |cx| match catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
-            Ok(poll) => poll.map(Ok),
-            Err(panic) => Poll::Ready(Err(panic)),
-        },
-    )
-    .await
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
