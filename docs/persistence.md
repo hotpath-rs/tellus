@@ -126,13 +126,17 @@ the next recovery replay more events.
 
 ## Fencing
 
-At most one incarnation can extend a stream. Every append is conditional on the expected next
-sequence number, and the store rejects an append whose expectation is stale. When two
-incarnations of one `PersistenceId` are alive at once, whether through a network partition under
-remoting or through plain misconfiguration, one of them loses every append race: its failure goes
-through supervision, and a restarted loser replays the winner's events instead of overwriting
-them. The stream never loses events and never interleaves two writers; the store is the arbiter,
-not the nodes.
+Every append is conditional on the expected next sequence number, and the store rejects an
+append whose expectation is stale. Hence no two appends extend a stream from the same head, and
+each append batch is atomic. When two incarnations of one `PersistenceId` are alive at once,
+through plain misconfiguration or a network partition, one of them loses each append race: its
+failure goes through supervision, and the restarted loser replays the winner's events instead of
+overwriting them. The stream never loses events, and the store is the arbiter, not the nodes.
+
+This is optimistic concurrency, not exclusive ownership. A restarted loser may win the next
+append race, so two live incarnations can alternate as writers of one stream, each append
+consistent with the events before it. Keeping one writer for a whole period needs an ownership
+fence in the store, which tellus does not provide.
 
 ## Sequence numbers
 
@@ -266,8 +270,9 @@ entity, sends a command with `tell` and then reads the store has to wait for the
   effects suppressed and `recovered` as the only world-touching step.
 - Events of one effect are atomic and durable before they are applied; sequence numbers are
   gapless per `PersistenceId`.
-- Conditional appends fence concurrent incarnations: one writer wins, the loser fails into
-  supervision and replays.
+- Conditional appends fence concurrent incarnations per append: of two appends from the same
+  head one wins, the loser fails into supervision and replays. This is optimistic concurrency, not
+  exclusive ownership: two live incarnations can alternate as writers.
 - Outward-facing actions are at-most-once: a crash can lose a `then` continuation, never an
   event.
 - Strict writes serialize commands: nothing overlaps a command's settlement, which bounds

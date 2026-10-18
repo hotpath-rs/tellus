@@ -330,10 +330,21 @@ where
         Ok(value) => Some(value),
 
         Err(error) => {
-            error!(%actor_id, %error, source = error.source(), "{failure}");
+            dispose_error(actor_id, error, |error| {
+                error!(%actor_id, %error, source = error.source(), "{failure}");
+            });
             None
         }
     }
+}
+
+// Separate unwind boundaries: dropping while unwinding a formatting panic would abort.
+pub(crate) fn dispose_error<E, L>(actor_id: ActorId, error: E, log: L)
+where
+    L: FnOnce(&E),
+{
+    catch_panic_and_log(actor_id, "error failed to display", || log(&error));
+    drop_containing_panic(actor_id, "error failed to drop", error);
 }
 
 pub(crate) fn catch_panic_and_log<T, F>(actor_id: ActorId, failure: &str, f: F) -> Option<T>
@@ -435,9 +446,10 @@ where
 
 /// The state must already have been dropped by the caller. The queued messages are moved out and
 /// the channel is dropped before their destructors run: senders observe the termination while the
-/// children still stop, and no user code runs in the window where a racing send can still slip
-/// past the drain (flume retains such a message until its last sender drops); the watchers are
-/// signaled last, since a terminated signal must prove that the actor's destructors have run.
+/// children still stop, and none of these destructors runs between drain and drop. A concurrent
+/// sender can still enqueue in that window; flume retains such a message until its last sender
+/// drops, which this sequence does not prevent. The watchers are signaled last, since a terminated
+/// signal must prove that the actor's destructors have run.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) async fn terminate<A, M>(actor: A, mut context: ActorContext<M>, mailbox: Mailbox<M>) {
     let actor_id = context.self_ref().actor_id();

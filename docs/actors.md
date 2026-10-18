@@ -393,7 +393,10 @@ completes, including the signals to the watchers. A destructor panic on a normal
 `receive` is equally contained: when `receive` returns an error and the state's destructor panics
 while the frame returns, that panic is caught like any other and fed to supervision. The locks the
 framework holds itself recover from poisoning ([`sync.rs`](../tellus/src/sync.rs)), so a panic
-contained by supervision cannot disable the watcher registry.
+contained by supervision cannot disable the watcher registry. A failure the framework logs, an
+actor's error as well as a store error under persistence, is formatted and then dropped in two
+separate unwind boundaries (`dispose_error`), so a panic in its `Display`, `source` or `Drop` is
+logged and contained too, even when both formatting and destructor panic.
 
 The one case out of reach is a panic during a panic: `init` or `receive` panics, and while that
 panic unwinds, the destructor of a value still alive in the frame (the state, the message, a
@@ -476,6 +479,12 @@ has to wait for the actor, since `tell` returns before the message is handled.
   are logged, not returned.
 - Messages from one sender arrive in send order; terminated signals are ordered behind the
   watched actor's delivered messages and prove its destructors have run.
+- A message sent concurrently with the termination can slip in after the mailbox was drained.
+  It is a dead letter, but it and the resources it captures are retained while any `ActorRef` to
+  the terminated actor lives. An `ask` whose request is such a message may time out; dropping the
+  remaining references before its deadline can still resolve it as `NoReply`. The terminated
+  signal's guarantee, covering the actor's state, its actor value and its descendants, is
+  unaffected.
 - `receive` is synchronous and cannot await; long running or blocking work runs in a future
   piped to the actor via `pipe_to_self`, whose output arrives as a message, at most once.
 - Request-response is at-most-once too: `ask` resolves exactly once, with the reply or an error,
