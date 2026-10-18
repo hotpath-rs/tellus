@@ -119,7 +119,6 @@ impl Actor for Echo {
         if let Incoming::Message(Request(reply_to)) = incoming {
             reply_to.reply(remaining);
         }
-
         Ok(next_control(remaining))
     }
 }

@@ -36,7 +36,6 @@ async fn main() -> anyhow::Result<()> {
 
     system.root().tell(Command::Stop);
     system.terminated().await?;
-
     Ok(())
 }
 

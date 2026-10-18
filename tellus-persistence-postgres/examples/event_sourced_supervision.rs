@@ -92,7 +92,6 @@ impl Actor for Overseer {
             loader.tell(Command::Load(value));
         }
         loader.tell(Command::Finish);
-
         Ok(())
     }
 
