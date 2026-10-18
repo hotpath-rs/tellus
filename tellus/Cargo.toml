@@ -74,6 +74,10 @@ name = "getting_started_07_device_manager"
 path = "examples/tutorials/getting_started/07_device_manager.rs"
 
 [[example]]
+name = "how_to_call_async_code"
+path = "examples/how_to/call_async_code.rs"
+
+[[example]]
 name              = "profile"
 required-features = [ "hotpath" ]
 

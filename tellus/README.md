@@ -142,8 +142,8 @@ handle it as part of the domain.
 
 `receive` is synchronous and runs on a Tokio worker: an actor cannot be stopped while `receive` is
 running, so a `receive` which never completes keeps all its ancestors from terminating. For long
-running or blocking work, spawn a task and send the result back via `ActorRef::tell` or a
-`ReplyTo`.
+running or blocking work, use `ActorContext::pipe_to_self`: it runs a future on its own task and
+delivers the output to the actor as an ordinary message.
 
 ### The actor tree and termination
 

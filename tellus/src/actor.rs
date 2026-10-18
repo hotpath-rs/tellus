@@ -45,9 +45,8 @@ pub trait Actor {
     /// # Deadlock
     /// An actor cannot be stopped while `receive` is running, which also blocks a Tokio worker. A
     /// `receive` which never completes hence keeps all ancestors from terminating. For long running
-    /// or blocking work spawn a task and send its result back via [ActorRef::tell].
+    /// or blocking work use [ActorContext::pipe_to_self].
     ///
-    /// [ActorRef::tell]: crate::ActorRef::tell
     /// [SupervisionStrategy]: crate::SupervisionStrategy
     fn receive(
         &self,
