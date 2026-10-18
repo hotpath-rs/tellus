@@ -3,9 +3,14 @@
 use serde::{Deserialize, Serialize};
 use std::{
     convert::Infallible,
+    error,
+    fmt::{self, Display, Formatter},
     future::pending,
     num::{NonZeroU32, NonZeroUsize},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering::SeqCst},
+    },
     time::Duration,
 };
 use tellus::{
@@ -751,6 +756,95 @@ fn encoded(event: &Increased) -> EncodedEvent {
     }
 }
 
+/// A store error whose `Display` and destructor panic, failing an append, is contained like any
+/// other failure: the actor restarts, and formatting and dropping the error each panic in their own
+/// unwind.
+#[tokio::test]
+async fn a_panicking_append_error_is_contained() {
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+    let store = FaultyStore::default()
+        .with_append_failures(1)
+        .with_panicking_errors();
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+
+    let system = ActorSystem::event_sourced_with_config(
+        Counter::new("19", probe_tx),
+        Persistence::new(store.clone()),
+        restart_config(),
+    );
+    assert_eq!(recv(&mut probe_rx, "no init probe").await, Probe::Init);
+    assert_eq!(
+        recv(&mut probe_rx, "no recovered probe").await,
+        Probe::Recovered
+    );
+
+    system.root().tell(Command::Increment(1));
+    assert_eq!(
+        recv(&mut probe_rx, "no handled probe").await,
+        Probe::Handled
+    );
+    assert_eq!(
+        recv(&mut probe_rx, "no init probe after the failed append").await,
+        Probe::Init
+    );
+    assert!(
+        store.error_hooks().displayed.load(SeqCst),
+        "the error was not displayed"
+    );
+    assert!(
+        store.error_hooks().dropped.load(SeqCst),
+        "the error was not dropped"
+    );
+
+    system.root().tell(Command::Stop);
+    assert_terminates(system, "system did not terminate").await;
+}
+
+/// A failed snapshot save is only a warning, also when the store error's `Display` and destructor
+/// panic: the actor keeps handling commands without restarting.
+#[tokio::test]
+async fn a_panicking_snapshot_save_error_keeps_the_actor_running() {
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+    let store = FaultyStore::default()
+        .with_failing_saves()
+        .with_panicking_errors();
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+
+    let system = ActorSystem::event_sourced(
+        Counter::new("20", probe_tx).with_snapshot_every(1),
+        Persistence::new(store.clone()).with_snapshot_store(store.clone()),
+    );
+    system.root().tell(Command::Increment(1));
+    system.root().tell(Command::Increment(2));
+    let count = system
+        .root()
+        .ask(TIMEOUT, Command::Get)
+        .await
+        .expect("no reply to get");
+    assert_eq!(count, 3);
+    assert!(
+        store.error_hooks().displayed.load(SeqCst),
+        "the error was not displayed"
+    );
+    assert!(
+        store.error_hooks().dropped.load(SeqCst),
+        "the error was not dropped"
+    );
+
+    system.root().tell(Command::Stop);
+    assert_terminates(system, "system did not terminate").await;
+
+    let mut inits = 0;
+    while let Ok(probe) = probe_rx.try_recv() {
+        if probe == Probe::Init {
+            inits += 1;
+        }
+    }
+    assert_eq!(inits, 1, "the actor must not restart");
+}
+
 async fn recv<T>(probe_rx: &mut mpsc::UnboundedReceiver<T>, not_received: &str) -> T {
     timeout(TIMEOUT, probe_rx.recv())
         .await
@@ -1086,6 +1180,7 @@ struct FaultyStore {
     append_panics: Arc<Mutex<u32>>,
     hang_reads: bool,
     fail_saves: bool,
+    error_hooks: Arc<ErrorHooks>,
 }
 
 impl FaultyStore {
@@ -1112,6 +1207,22 @@ impl FaultyStore {
     fn with_failing_saves(mut self) -> Self {
         self.fail_saves = true;
         self
+    }
+
+    fn with_panicking_errors(mut self) -> Self {
+        self.error_hooks = Arc::new(ErrorHooks {
+            panicking: true,
+            ..ErrorHooks::default()
+        });
+        self
+    }
+
+    fn error_hooks(&self) -> &ErrorHooks {
+        &self.error_hooks
+    }
+
+    fn error(&self) -> FaultyStoreError {
+        FaultyStoreError(self.error_hooks.clone())
     }
 
     fn inner(&self) -> &InMemoryStore {
@@ -1143,7 +1254,7 @@ impl EventStore for FaultyStore {
                 .expect("append failures lock poisoned");
             if *failures > 0 {
                 *failures -= 1;
-                return Err(AppendError::Store(FaultyStoreError));
+                return Err(AppendError::Store(self.error()));
             }
         }
 
@@ -1206,7 +1317,7 @@ impl SnapshotStore for FaultyStore {
         snapshot: EncodedSnapshot,
     ) -> Result<(), Self::Error> {
         if self.fail_saves {
-            return Err(FaultyStoreError);
+            return Err(self.error());
         }
 
         self.inner
@@ -1220,6 +1331,34 @@ impl SnapshotStore for FaultyStore {
     }
 }
 
-#[derive(Debug, Error)]
-#[error("injected store failure")]
-struct FaultyStoreError;
+/// An injected store failure; with panicking hooks, its `Display` and its destructor panic.
+#[derive(Debug)]
+struct FaultyStoreError(Arc<ErrorHooks>);
+
+impl Display for FaultyStoreError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.0.displayed.store(true, SeqCst);
+        if self.0.panicking {
+            panic!("store error display panics on purpose");
+        }
+        f.write_str("injected store failure")
+    }
+}
+
+impl error::Error for FaultyStoreError {}
+
+impl Drop for FaultyStoreError {
+    fn drop(&mut self) {
+        self.0.dropped.store(true, SeqCst);
+        if self.0.panicking {
+            panic!("store error destructor panics on purpose");
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ErrorHooks {
+    panicking: bool,
+    displayed: AtomicBool,
+    dropped: AtomicBool,
+}

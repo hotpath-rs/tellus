@@ -2,8 +2,8 @@ use crate::{
     ActorConfig, ActorContext, ActorId, ActorRef, ActorSystem,
     actor_context::{
         PanicPayload, STATE_FAILED_TO_DROP, await_restart, catch_and_log, catch_panic_and_log,
-        catch_panic_and_log_async, catch_unwind_async, drop_containing_panic, next_incoming,
-        terminate,
+        catch_panic_and_log_async, catch_unwind_async, dispose_error, drop_containing_panic,
+        next_incoming, terminate,
     },
     actor_ref::SelfRef,
     actor_system::watch_root,
@@ -318,7 +318,9 @@ where
         Ok(snapshot) => snapshot,
 
         Err(error) => {
-            error!(%actor_id, %error, source = error.source(), "{FAILED_TO_RECOVER}");
+            dispose_error(actor_id, error, |error| {
+                error!(%actor_id, %error, source = error.source(), "{FAILED_TO_RECOVER}");
+            });
             return None;
         }
     };
@@ -340,12 +342,14 @@ where
             Ok(Ok(snapshot)) => Some((snapshot, next_seq_no)),
 
             Ok(Err(error)) => {
-                warn!(
-                    %actor_id,
-                    %error,
-                    source = error.source(),
-                    "snapshot discarded, replaying in full"
-                );
+                dispose_error(actor_id, error, |error| {
+                    warn!(
+                        %actor_id,
+                        %error,
+                        source = error.source(),
+                        "snapshot discarded, replaying in full"
+                    );
+                });
                 None
             }
 
@@ -387,7 +391,9 @@ where
             Some(Ok(page)) => page,
 
             Some(Err(error)) => {
-                error!(%actor_id, %error, source = error.source(), "{FAILED_TO_RECOVER}");
+                dispose_error(actor_id, error, |error| {
+                    error!(%actor_id, %error, source = error.source(), "{FAILED_TO_RECOVER}");
+                });
                 drop_containing_panic(actor_id, STATE_FAILED_TO_DROP, state);
                 return None;
             }
@@ -457,12 +463,14 @@ where
             Some(Ok(())) => {}
 
             Some(Err(error)) => {
-                error!(
-                    %actor_id,
-                    %error,
-                    source = error.source(),
-                    "actor failed to append events"
-                );
+                dispose_error(actor_id, error, |error| {
+                    error!(
+                        %actor_id,
+                        %error,
+                        source = error.source(),
+                        "actor failed to append events"
+                    );
+                });
                 drop_containing_panic(actor_id, VALUES_FAILED_TO_DROP, (state, events, thens));
                 return None;
             }
@@ -530,7 +538,9 @@ where
         Ok(Ok(value)) => Some(value),
 
         Ok(Err(error)) => {
-            warn!(%actor_id, %error, source = error.source(), "{SNAPSHOT_NOT_SAVED}");
+            dispose_error(actor_id, error, |error| {
+                warn!(%actor_id, %error, source = error.source(), "{SNAPSHOT_NOT_SAVED}");
+            });
             None
         }
 

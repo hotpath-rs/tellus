@@ -1,4 +1,13 @@
-use std::{convert::Infallible, time::Duration};
+use std::{
+    convert::Infallible,
+    error::Error,
+    fmt::{self, Debug, Display, Formatter},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::SeqCst},
+    },
+    time::Duration,
+};
 use tellus::{Actor, ActorContext, ActorRef, ActorSystem, Control, Incoming, Nothing};
 use thiserror::Error;
 use tokio::{sync::mpsc, time::timeout};
@@ -187,6 +196,65 @@ async fn panicking_state_destructor_on_error_is_supervised() {
     system.root().tell(());
 
     assert_terminates(system).await;
+}
+
+/// A failure is logged after `init` or `receive` has returned, so a panic in the error's `Display`
+/// happens outside of them; it must be contained, and the actor still terminates.
+#[tokio::test]
+async fn panicking_error_display_is_contained() {
+    for failing in [Failing::Init, Failing::Receive] {
+        let hooks = assert_failure_terminates(failing, Panics::display()).await;
+        assert!(hooks.display.load(SeqCst), "display was not called");
+        assert!(hooks.drop.load(SeqCst), "the error was not dropped");
+    }
+}
+
+/// The same for a panic in the error's `source`, which the failure log reads too.
+#[tokio::test]
+async fn panicking_error_source_is_contained() {
+    for failing in [Failing::Init, Failing::Receive] {
+        let hooks = assert_failure_terminates(failing, Panics::source()).await;
+        assert!(hooks.source.load(SeqCst), "source was not called");
+        assert!(hooks.drop.load(SeqCst), "the error was not dropped");
+    }
+}
+
+/// The same for a panic in the error's destructor, which runs after the failure is logged.
+#[tokio::test]
+async fn panicking_error_drop_is_contained() {
+    for failing in [Failing::Init, Failing::Receive] {
+        let hooks = assert_failure_terminates(failing, Panics::drop()).await;
+        assert!(hooks.drop.load(SeqCst), "the error was not dropped");
+    }
+}
+
+/// Formatting and dropping the error are contained separately: a destructor panicking after a
+/// `Display` panic does not run during that panic's unwind, which would abort the process.
+#[tokio::test]
+async fn panicking_error_display_and_drop_are_contained_separately() {
+    for failing in [Failing::Init, Failing::Receive] {
+        let hooks = assert_failure_terminates(failing, Panics::display_and_drop()).await;
+        assert!(hooks.display.load(SeqCst), "display was not called");
+        assert!(hooks.drop.load(SeqCst), "the error was not dropped");
+    }
+}
+
+/// Without a subscriber which formats fields, a logged error is never formatted.
+async fn assert_failure_terminates(failing: Failing, panics: Panics) -> Arc<Hooks> {
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+
+    let hooks = Arc::new(Hooks::new(panics));
+    let system = ActorSystem::new(HostileFailure {
+        failing,
+        hooks: hooks.clone(),
+    });
+    if failing == Failing::Receive {
+        system.root().tell(());
+    }
+
+    assert_terminates(system).await;
+    hooks
 }
 
 async fn recv<T>(rx: &mut mpsc::Receiver<T>, not_received: &str) -> T {
@@ -550,5 +618,134 @@ impl Terminated {
 impl Drop for Terminated {
     fn drop(&mut self) {
         let _ = self.1.try_send(self.0);
+    }
+}
+
+struct HostileFailure {
+    failing: Failing,
+    hooks: Arc<Hooks>,
+}
+
+impl Actor for HostileFailure {
+    type Message = ();
+    type State = ();
+    type Error = HostileError;
+
+    fn init(&self, _: &ActorContext<Self::Message>) -> Result<Self::State, Self::Error> {
+        match self.failing {
+            Failing::Init => Err(HostileError(self.hooks.clone())),
+            Failing::Receive => Ok(()),
+        }
+    }
+
+    fn receive(
+        &self,
+        _: &ActorContext<Self::Message>,
+        _: Incoming<Self::Message>,
+        _: Self::State,
+    ) -> Result<Control<Self::State>, Self::Error> {
+        Err(HostileError(self.hooks.clone()))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Failing {
+    Init,
+    Receive,
+}
+
+struct HostileError(Arc<Hooks>);
+
+impl Debug for HostileError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("HostileError")
+    }
+}
+
+impl Display for HostileError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.0.display.store(true, SeqCst);
+        if self.0.panics.display {
+            panic!("error display panics on purpose");
+        }
+        f.write_str("hostile error")
+    }
+}
+
+impl Error for HostileError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.0.source.store(true, SeqCst);
+        if self.0.panics.source {
+            panic!("error source panics on purpose");
+        }
+        None
+    }
+}
+
+impl Drop for HostileError {
+    fn drop(&mut self) {
+        self.0.drop.store(true, SeqCst);
+        if self.0.panics.drop {
+            panic!("error destructor panics on purpose");
+        }
+    }
+}
+
+struct Hooks {
+    panics: Panics,
+    display: AtomicBool,
+    source: AtomicBool,
+    drop: AtomicBool,
+}
+
+impl Hooks {
+    fn new(panics: Panics) -> Self {
+        Self {
+            panics,
+            display: AtomicBool::new(false),
+            source: AtomicBool::new(false),
+            drop: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Panics {
+    display: bool,
+    source: bool,
+    drop: bool,
+}
+
+impl Panics {
+    fn display() -> Self {
+        Self {
+            display: true,
+            source: false,
+            drop: false,
+        }
+    }
+
+    fn source() -> Self {
+        Self {
+            display: false,
+            source: true,
+            drop: false,
+        }
+    }
+
+    fn drop() -> Self {
+        Self {
+            display: false,
+            source: false,
+            drop: true,
+        }
+    }
+
+    fn display_and_drop() -> Self {
+        Self {
+            display: true,
+            source: false,
+            drop: true,
+        }
     }
 }
