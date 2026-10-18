@@ -30,7 +30,12 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
-use tokio::{select, sync::watch, task, time::Instant};
+use tokio::{
+    select,
+    sync::watch,
+    task::{self, consume_budget},
+    time::Instant,
+};
 use tracing::{debug, error, warn};
 
 const FAILED_TO_RECOVER: &str = "actor failed to recover";
