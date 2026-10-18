@@ -28,24 +28,27 @@ tellus's fencing guarantee. An empty append inserts nothing but is still fenced.
 
 ## Examples
 
-Both recipes start the `postgres` service of the repository's
-[docker-compose.yaml](../docker-compose.yaml); the database is addressed via `DATABASE_URL`,
-defaulting to that service. `docker compose down` stops it, `down -v` resets the data.
+Both need the `postgres` service of the repository's
+[docker-compose.yaml](../docker-compose.yaml); start it with `docker compose up -d --wait postgres`.
+The database is addressed via `DATABASE_URL`, defaulting to that service. `docker compose down`
+stops it, `down -v` resets the data.
 
 - [`event_sourced_counter`](examples/event_sourced_counter.rs): a counter surviving process
   restarts; every run recovers the count by replay, increments it once and prints the new count, so
   repeated runs count on:
 
   ```shell
-  just run-examples-event-sourced-counter
+  RUST_LOG=tellus=debug cargo run --quiet -p tellus-persistence-postgres \
+    --example event_sourced_counter
   ```
 
-- [`event_sourced_supervision`](examples/event_sourced_supervision.rs): the flaky loader of
-  tellus's plain supervision example, now event-sourced, so the restart after a toxic value
-  recovers the count by replay instead of starting over at 0:
+- [`event_sourced_supervision`](examples/event_sourced_supervision.rs): a flaky loader under the
+  `Restart` supervision strategy, event-sourced, so the restart after a toxic value recovers the
+  count by replay instead of starting over at 0:
 
   ```shell
-  just run-examples-event-sourced-supervision
+  RUST_LOG=tellus=debug cargo run --quiet -p tellus-persistence-postgres \
+    --example event_sourced_supervision
   ```
 
 ## Tests

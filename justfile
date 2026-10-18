@@ -53,32 +53,6 @@ doc:
 
 all: check fmt lint test doc
 
-run-examples-hello:
-    cargo run -p tellus --example hello
-
-run-examples-counter:
-    cargo run -p tellus --example counter
-
-run-examples-scatter-gather:
-    RUST_LOG=tellus=debug cargo run -p tellus --example scatter_gather
-
-run-examples-supervision:
-    RUST_LOG=tellus=debug cargo run -p tellus --example supervision
-
-run-examples-work-pulling:
-    RUST_LOG=tellus=debug cargo run -p tellus --example work_pulling
-
-run-examples-device-manager:
-    RUST_LOG=tellus=debug cargo run -p tellus --example device_manager
-
-run-examples-event-sourced-counter:
-    docker compose up -d --wait postgres
-    RUST_LOG=tellus=debug cargo run -p tellus-persistence-postgres --example event_sourced_counter
-
-run-examples-event-sourced-supervision:
-    docker compose up -d --wait postgres
-    RUST_LOG=tellus=debug cargo run -p tellus-persistence-postgres --example event_sourced_supervision
-
 bench:
     cargo bench -p tellus --bench messaging
     cargo bench -p tellus --features "persistence,persistence-in-memory" --bench persistence

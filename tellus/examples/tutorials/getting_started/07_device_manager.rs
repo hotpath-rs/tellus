@@ -1,13 +1,10 @@
-//! tellus's take on Akka's IoT device manager: the root routes commands to per-group and
-//! per-device actors, spawning them on demand and pruning its registry via watch. Reading a group's
-//! average temperature is served by a per-request `Query` child which fans `Read` out to every
-//! device: the watch ordering guarantee proves that a terminated device will never reply, so the
-//! only deadline needed is the timeout of the `ask` at the async boundary. Devices restart on
-//! failure: an invalid reading fails the device, which loses its last reading but keeps its
-//! mailbox, so it answers the queued read with no reading yet.
+//! Step 7 of the getting started tutorial: a device manager routes commands to groups, which it
+//! spawns on demand, one more level of the actor tree on top of the groups and devices of step 6.
+//! It is tellus's take on the IoT device manager from the Apache Pekko documentation.
 //!
-//! The averages are printed to stdout and tellus logs to stderr; the log level is configured via
-//! `RUST_LOG`, e.g. `RUST_LOG=tellus=debug cargo run --quiet -p tellus --example device_manager`.
+//! The averages are printed to stdout and tellus logs the failures and restarts to stderr; the log
+//! level is configured via `RUST_LOG`, e.g.
+//! `RUST_LOG=tellus=debug cargo run --quiet -p tellus --example getting_started_07_device_manager`.
 
 use anyhow::Context;
 use std::{collections::HashMap, convert::Infallible, io, num::NonZeroU32, time::Duration};
@@ -20,6 +17,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 const MAX_RESTARTS: NonZeroU32 = NonZeroU32::new(3).expect("3 is not zero");
 
+// ANCHOR: main
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
@@ -27,50 +25,45 @@ async fn main() -> anyhow::Result<()> {
     let system = ActorSystem::new(DeviceManager);
     let manager = system.root();
 
-    manager.tell(Command::Record {
-        group: "attic",
-        device: "left",
-        degrees: 21.5,
-    });
-    manager.tell(Command::Record {
-        group: "attic",
-        device: "right",
-        degrees: 19.1,
-    });
-    manager.tell(Command::Record {
-        group: "cellar",
-        device: "main",
-        degrees: 11.0,
-    });
-    // The invalid reading fails the device, which restarts and thereby loses the 11.0.
-    manager.tell(Command::Record {
-        group: "cellar",
-        device: "main",
-        degrees: f64::NAN,
+    let readings = [
+        ("attic", "left", 21.5),
+        ("attic", "right", 19.1),
+        ("cellar", "main", 11.0),
+        ("cellar", "main", f64::NAN),
+    ];
+    for (group_name, device_name, degrees) in readings {
+        manager.tell(Command::Record {
+            group_name,
+            device_name,
+            degrees,
+        });
+    }
+    manager.tell(Command::Retire {
+        group_name: "attic",
+        device_name: "right",
     });
 
-    for group in ["attic", "cellar", "garage"] {
+    for group_name in ["attic", "cellar", "garage"] {
         let average = manager
-            .ask(Duration::from_secs(2), |reply_to| Command::Average {
-                group,
+            .ask(Duration::from_secs(5), |reply_to| Command::Average {
+                group_name,
                 reply_to,
             })
             .await
             .context("asking for the average temperature")?;
-
         match average {
-            Some(average) => println!("## Average temperature in {group}: {average:.1}"),
-            None => println!("## No temperature readings in {group}"),
+            Some(degrees) => println!("Average temperature in {group_name}: {degrees:.2}"),
+            None => println!("No readings in {group_name}"),
         }
     }
 
-    manager.tell(Command::Shutdown);
-
+    system.stop();
     system
         .terminated()
         .await
         .context("awaiting actor system termination")
 }
+// ANCHOR_END: main
 
 fn init_tracing() {
     tracing_subscriber::registry()
@@ -84,6 +77,7 @@ fn init_tracing() {
         .init();
 }
 
+// ANCHOR: manager
 struct DeviceManager;
 
 impl Actor for DeviceManager {
@@ -101,33 +95,44 @@ impl Actor for DeviceManager {
         incoming: Incoming<Self::Message>,
         mut groups: Self::State,
     ) -> Result<Control<Self::State>, Self::Error> {
-        match incoming {
-            Incoming::Message(Command::Record {
-                group,
-                device,
+        let Incoming::Message(command) = incoming else {
+            unreachable!("the manager watches no actor, hence never gets a terminated signal")
+        };
+
+        match command {
+            Command::Record {
+                group_name,
+                device_name,
                 degrees,
-            }) => {
-                let group_ref = groups.entry(group).or_insert_with(|| {
-                    let group_ref = context.spawn(Group { name: group });
-                    context.watch(&group_ref);
-                    group_ref
+            } => {
+                let group = groups
+                    .entry(group_name)
+                    .or_insert_with(|| context.spawn(Group));
+                group.tell(GroupMessage::Record {
+                    device_name,
+                    degrees,
                 });
-                group_ref.tell(GroupMessage::Record { device, degrees });
                 Ok(Control::Continue(groups))
             }
 
-            Incoming::Message(Command::Average { group, reply_to }) => {
-                match groups.get(group) {
-                    Some(group_ref) => group_ref.tell(GroupMessage::Average(reply_to)),
-                    None => reply_to.reply(None),
+            Command::Retire {
+                group_name,
+                device_name,
+            } => {
+                if let Some(group) = groups.get(group_name) {
+                    group.tell(GroupMessage::Retire { device_name });
                 }
                 Ok(Control::Continue(groups))
             }
 
-            Incoming::Message(Command::Shutdown) => Ok(Control::Stop),
-
-            Incoming::Terminated(actor_id) => {
-                groups.retain(|_, group_ref| group_ref.actor_id() != actor_id);
+            Command::Average {
+                group_name,
+                reply_to,
+            } => {
+                match groups.get(group_name) {
+                    Some(group) => group.tell(GroupMessage::Average(reply_to)),
+                    None => reply_to.reply(None),
+                }
                 Ok(Control::Continue(groups))
             }
         }
@@ -136,22 +141,24 @@ impl Actor for DeviceManager {
 
 enum Command {
     Record {
-        group: &'static str,
-        device: &'static str,
+        group_name: &'static str,
+        device_name: &'static str,
         degrees: f64,
     },
 
-    Average {
-        group: &'static str,
-        reply_to: ReplyTo<Option<f64>>,
+    Retire {
+        group_name: &'static str,
+        device_name: &'static str,
     },
 
-    Shutdown,
+    Average {
+        group_name: &'static str,
+        reply_to: ReplyTo<Option<f64>>,
+    },
 }
+// ANCHOR_END: manager
 
-struct Group {
-    name: &'static str,
-}
+struct Group;
 
 impl Actor for Group {
     type Message = GroupMessage;
@@ -169,23 +176,26 @@ impl Actor for Group {
         mut devices: Self::State,
     ) -> Result<Control<Self::State>, Self::Error> {
         match incoming {
-            Incoming::Message(GroupMessage::Record { device, degrees }) => {
-                let device_ref = devices.entry(device).or_insert_with(|| {
-                    // A sensor is flaky by nature, so a device restarts on failure.
+            Incoming::Message(GroupMessage::Record {
+                device_name,
+                degrees,
+            }) => {
+                let device = devices.entry(device_name).or_insert_with(|| {
                     let config = ActorConfig::default().with_supervision_strategy(
                         SupervisionStrategy::Restart(RestartPolicy::new(MAX_RESTARTS)),
                     );
-                    let device_ref = context.spawn_with_config(
-                        Device {
-                            group: self.name,
-                            name: device,
-                        },
-                        config,
-                    );
-                    context.watch(&device_ref);
-                    device_ref
+                    let device = context.spawn_with_config(Device, config);
+                    context.watch(&device);
+                    device
                 });
-                device_ref.tell(DeviceMessage::Record(degrees));
+                device.tell(DeviceMessage::Record(degrees));
+                Ok(Control::Continue(devices))
+            }
+
+            Incoming::Message(GroupMessage::Retire { device_name }) => {
+                if let Some(device) = devices.get(device_name) {
+                    device.tell(DeviceMessage::Retire);
+                }
                 Ok(Control::Continue(devices))
             }
 
@@ -198,8 +208,8 @@ impl Actor for Group {
                 Ok(Control::Continue(devices))
             }
 
-            Incoming::Terminated(actor_id) => {
-                devices.retain(|_, device_ref| device_ref.actor_id() != actor_id);
+            Incoming::Terminated(device_id) => {
+                devices.retain(|_, device| device.actor_id() != device_id);
                 Ok(Control::Continue(devices))
             }
         }
@@ -207,7 +217,15 @@ impl Actor for Group {
 }
 
 enum GroupMessage {
-    Record { device: &'static str, degrees: f64 },
+    Record {
+        device_name: &'static str,
+        degrees: f64,
+    },
+
+    Retire {
+        device_name: &'static str,
+    },
+
     Average(ReplyTo<Option<f64>>),
 }
 
@@ -228,41 +246,29 @@ impl Actor for Query {
         incoming: Incoming<Self::Message>,
         state: Self::State,
     ) -> Result<Control<Self::State>, Self::Error> {
-        match incoming {
-            Incoming::Message(QueryMessage::Start { devices, reply_to }) => {
-                if devices.is_empty() {
-                    reply_to.reply(None);
-                    Ok(Control::Stop)
-                } else {
-                    let mut pending = HashMap::new();
-                    for device in devices {
-                        context.watch(&device);
-                        let device_id = device.actor_id();
-                        device.tell(DeviceMessage::Read(context.reply_to(move |reading| {
-                            QueryMessage::Reading { device_id, reading }
-                        })));
-                        pending.insert(device_id, device);
-                    }
-                    Ok(Control::Continue(QueryState::Running {
-                        pending,
-                        sum: 0.0,
-                        count: 0,
-                        reply_to,
-                    }))
+        match (incoming, state) {
+            (Incoming::Message(QueryMessage::Start { devices, reply_to }), _) => {
+                let mut pending = HashMap::new();
+                for device in devices {
+                    context.watch(&device);
+                    let device_id = device.actor_id();
+                    device.tell(DeviceMessage::Read(context.reply_to(move |reading| {
+                        QueryMessage::Reading { device_id, reading }
+                    })));
+                    pending.insert(device_id, device);
                 }
+                Query::conclude(pending, 0.0, 0, reply_to)
             }
 
-            Incoming::Message(QueryMessage::Reading { device_id, reading }) => {
-                let QueryState::Running {
+            (
+                Incoming::Message(QueryMessage::Reading { device_id, reading }),
+                QueryState::Running {
                     mut pending,
                     mut sum,
                     mut count,
                     reply_to,
-                } = state
-                else {
-                    unreachable!("a reading only arrives after the start message")
-                };
-
+                },
+            ) => {
                 if let Some(device) = pending.remove(&device_id) {
                     context.unwatch(&device);
                 }
@@ -273,21 +279,21 @@ impl Actor for Query {
                 Query::conclude(pending, sum, count, reply_to)
             }
 
-            Incoming::Terminated(device_id) => {
-                let QueryState::Running {
+            (
+                Incoming::Terminated(device_id),
+                QueryState::Running {
                     mut pending,
                     sum,
                     count,
                     reply_to,
-                } = state
-                else {
-                    unreachable!("watching only starts with the start message")
-                };
-
-                // The ordering guarantee proves this device's reply can no longer arrive.
+                },
+            ) => {
+                // The ordering guarantee proves that this device's reading can no longer arrive.
                 pending.remove(&device_id);
                 Query::conclude(pending, sum, count, reply_to)
             }
+
+            (_, QueryState::Starting) => unreachable!("the start message comes first"),
         }
     }
 }
@@ -336,10 +342,7 @@ enum QueryState {
     },
 }
 
-struct Device {
-    group: &'static str,
-    name: &'static str,
-}
+struct Device;
 
 impl Actor for Device {
     type Message = DeviceMessage;
@@ -363,15 +366,14 @@ impl Actor for Device {
         match message {
             DeviceMessage::Record(degrees) if degrees.is_nan() => Err(InvalidReading),
 
-            DeviceMessage::Record(degrees) => {
-                println!("## {}/{} recorded {degrees}", self.group, self.name);
-                Ok(Control::Continue(Some(degrees)))
-            }
+            DeviceMessage::Record(degrees) => Ok(Control::Continue(Some(degrees))),
 
             DeviceMessage::Read(reply_to) => {
                 reply_to.reply(last_reading);
                 Ok(Control::Continue(last_reading))
             }
+
+            DeviceMessage::Retire => Ok(Control::Stop),
         }
     }
 }
@@ -379,6 +381,7 @@ impl Actor for Device {
 enum DeviceMessage {
     Record(f64),
     Read(ReplyTo<Option<f64>>),
+    Retire,
 }
 
 #[derive(Debug, Error)]

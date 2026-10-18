@@ -1,4 +1,9 @@
-# tellus
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://tellus.rs/brand/lockup-dark.svg">
+    <img alt="tellus" src="https://tellus.rs/brand/lockup.svg" height="56">
+  </picture>
+</h1>
 
 **Actors for Rust, on solid ground.**
 
@@ -25,7 +30,7 @@
 An actor framework for Rust, built on [Tokio](https://tokio.rs): typed messages, supervision
 trees, death watch with an ordering guarantee and optional event-sourced persistence. Inspired by
 Carl Hewitt's [Actor Model](https://en.wikipedia.org/wiki/Actor_model) and strongly influenced by
-[Akka](https://akka.io).
+Akka, continued as open source by [Apache Pekko](https://pekko.apache.org).
 
 tellus is under active development and its API is still settling.
 
@@ -78,7 +83,9 @@ use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let system = ActorSystem::new(Greeter);
+
     system.root().tell(Greet("Tellus".to_string()));
+
     system
         .terminated()
         .await
@@ -168,7 +175,8 @@ through `receive` like any other message.
 `Incoming::Terminated` signal carrying the terminated actor's `ActorId`. The signal is ordered
 behind all messages the terminated actor has delivered to the watcher, hence receiving it proves
 the watcher has seen every message from that actor it will ever see: each arrived before the
-signal or was dropped as a dead letter; see `examples/scatter_gather.rs` for putting this to work.
+signal or was dropped as a dead letter; see
+[`05_query.rs`](examples/tutorials/getting_started/05_query.rs) for putting this to work.
 Watching an actor that has already terminated delivers the signal right away, and terminated
 signals are delivered even when a bounded mailbox is full. `ActorContext::unwatch` stops
 watching: after it returns, no terminated signal for that actor is received, even if the signal
@@ -257,39 +265,18 @@ returned by `handle` against the entity's state, without a store. See the Testin
 
 ## Examples
 
-Ordered from minimal to real-world-ish, each building on the features of the previous ones. All
-examples print their results to stdout; those which set up logging log to stderr, with the log
-level configured via `RUST_LOG`.
+The examples in [`examples/tutorials/getting_started`](examples/tutorials/getting_started) are the
+code of the [getting started tutorial](https://tellus.rs/docs/tutorials/getting-started/), one
+program per step: from a single actor via child actors, watch and a per-request query to
+supervision and a device manager on top. Each step builds on the previous one. All examples print
+their results to stdout; those which set up logging log to stderr, with the log level configured
+via `RUST_LOG`.
 
-- [`hello`](examples/hello.rs): the getting started snippet above:
+```shell
+cargo run --quiet -p tellus --example getting_started_01_hello
+```
 
-  ```shell
-  cargo run --quiet -p tellus --example hello
-  ```
-
-- [`counter`](examples/counter.rs): a counter actor showing the two send modes: `tell` fires
-  increments without awaiting anything, `ask` sends a request carrying a `ReplyTo` and awaits the
-  reply under a timeout:
-
-  ```shell
-  cargo run --quiet -p tellus --example counter
-  ```
-
-- [`scatter_gather`](examples/scatter_gather.rs): a root actor scatters a workload across worker
-  actors and gathers their partial results, requested via `ActorContext::reply_to` and completed
-  using the watch ordering guarantee to know when all results are in:
-
-  ```shell
-  RUST_LOG=tellus=debug cargo run --quiet -p tellus --example scatter_gather
-  ```
-
-- [`supervision`](examples/supervision.rs): a flaky worker under the `Restart` supervision
-  strategy, showing what a backoff-paced restart rebuilds (the state, via `init`) and what it
-  retains (the actor value and the mailbox):
-
-  ```shell
-  RUST_LOG=tellus=debug cargo run --quiet -p tellus --example supervision
-  ```
+Beyond the tutorial:
 
 - [`work_pulling`](examples/work_pulling.rs): workers request jobs from a manager whenever they
   are ready, so a bounded mailbox of capacity one suffices: backpressure by design, without
@@ -299,22 +286,16 @@ level configured via `RUST_LOG`.
   RUST_LOG=tellus=debug cargo run --quiet -p tellus --example work_pulling
   ```
 
-- [`device_manager`](examples/device_manager.rs): tellus's take on Akka's IoT device manager and
-  the capstone of this list: a dynamic actor hierarchy with watch-based registry pruning, `ask` at
-  the async boundary, a per-request query child aggregating device replies exactly thanks to the
-  ordering guarantee, and restarting devices:
-
-  ```shell
-  RUST_LOG=tellus=debug cargo run --quiet -p tellus --example device_manager
-  ```
-
 The event-sourced examples live with the PostgreSQL stores in
-[`tellus-persistence-postgres`](../tellus-persistence-postgres); both start the `postgres` service
+[`tellus-persistence-postgres`](../tellus-persistence-postgres); both need the `postgres` service
 from the root `docker-compose.yaml`:
 
 ```shell
-just run-examples-event-sourced-counter
-just run-examples-event-sourced-supervision
+docker compose up -d --wait postgres
+RUST_LOG=tellus=debug cargo run --quiet -p tellus-persistence-postgres \
+  --example event_sourced_counter
+RUST_LOG=tellus=debug cargo run --quiet -p tellus-persistence-postgres \
+  --example event_sourced_supervision
 ```
 
 ## License

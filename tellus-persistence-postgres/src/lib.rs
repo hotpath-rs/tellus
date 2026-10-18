@@ -9,6 +9,10 @@
 //! fails with [AppendError::Conflict] and leaves the stream untouched, which is tellus's fencing
 //! guarantee. An empty append inserts nothing but is still fenced.
 
+#![doc(
+    html_logo_url = "https://tellus.rs/brand/logo-tile.svg",
+    html_favicon_url = "https://tellus.rs/favicon.svg"
+)]
 #![warn(missing_docs)]
 
 use sqlx::{PgPool, Row, migrate::Migrator, postgres::PgRow};

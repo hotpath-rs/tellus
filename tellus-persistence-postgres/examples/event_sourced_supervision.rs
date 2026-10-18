@@ -1,4 +1,4 @@
-//! The flaky `Loader` of the plain supervision example, now event-sourced: the count is a fold of
+//! A flaky `Loader` under the `Restart` supervision strategy, event-sourced: the count is a fold of
 //! persisted events, so the restart after a toxic value recovers it by replay from PostgreSQL
 //! instead of starting over at 0, and a rerun of the whole process counts on where the last one
 //! stopped. The mailbox survives a restart as before, so the values queued behind a toxic one
@@ -7,10 +7,9 @@
 //! The output is printed to stdout and tellus logs the failures and restarts to stderr; the log
 //! level is configured via `RUST_LOG`.
 //!
-//! Run it via `just run-examples-event-sourced-supervision`, which starts the `postgres` service
-//! of the repository's docker-compose.yaml via `docker compose up -d --wait postgres`. The
-//! database is addressed via `DATABASE_URL`, defaulting to that service;
-//! `docker compose down -v postgres` resets the count.
+//! It needs the `postgres` service of the repository's docker-compose.yaml, started via
+//! `docker compose up -d --wait postgres`. The database is addressed via `DATABASE_URL`, defaulting
+//! to that service; `docker compose down -v postgres` resets the count.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

@@ -1,10 +1,9 @@
 //! An event-sourced counter surviving process restarts: every run recovers the count from
 //! PostgreSQL by replay, increments it once and prints the new count, so repeated runs count on.
 //!
-//! Run it via `just run-examples-event-sourced-counter`, which starts the `postgres` service of
-//! the repository's docker-compose.yaml via `docker compose up -d --wait postgres`. The database
-//! is addressed via `DATABASE_URL`, defaulting to that service; `docker compose down -v postgres`
-//! resets the count.
+//! It needs the `postgres` service of the repository's docker-compose.yaml, started via
+//! `docker compose up -d --wait postgres`. The database is addressed via `DATABASE_URL`, defaulting
+//! to that service; `docker compose down -v postgres` resets the count.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

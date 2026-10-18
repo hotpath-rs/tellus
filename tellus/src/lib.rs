@@ -42,6 +42,10 @@
 //! actor system: [testing::TestContext] provides the [ActorContext] to call [Actor::receive],
 //! `EventSourced::handle` and the like directly, and collects what the actor sends to itself.
 
+#![doc(
+    html_logo_url = "https://tellus.rs/brand/logo-tile.svg",
+    html_favicon_url = "https://tellus.rs/favicon.svg"
+)]
 #![warn(missing_docs)]
 
 #[cfg(feature = "persistence-tests")]

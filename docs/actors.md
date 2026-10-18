@@ -32,8 +32,8 @@ Each actor runs as one Tokio task and owns a mailbox, unbounded by default.
 
 ## A first example
 
-Condensed from [`examples/hello.rs`](../tellus/examples/hello.rs), a root actor which greets for
-the one message it receives and then stops:
+Condensed from [`01_hello.rs`](../tellus/examples/tutorials/getting_started/01_hello.rs), a root
+actor which greets for the one message it receives and then stops:
 
 ```rust
 let system = ActorSystem::new(Greeter);
@@ -65,9 +65,9 @@ impl Actor for Greeter {
 }
 ```
 
-For a larger example see [`examples/scatter_gather.rs`](../tellus/examples/scatter_gather.rs),
-where a root actor scatters a workload across watched workers and uses the ordering guarantee to
-know when all partial results are in.
+For a larger example see [`05_query.rs`](../tellus/examples/tutorials/getting_started/05_query.rs),
+where a query actor asks every watched device for its reading and uses the ordering guarantee to
+know when all readings are in.
 
 ## Defining an actor
 
