@@ -23,3 +23,7 @@ testcontainers-modules = { workspace = true, features = [ "postgres" ] }
 tokio                  = { workspace = true, features = [ "macros", "rt-multi-thread" ] }
 tracing-subscriber     = { workspace = true, features = [ "env-filter", "fmt", "json" ] }
 tellus                 = { workspace = true, features = [ "persistence-tests" ] }
+
+[[example]]
+name = "event_sourced_04_postgres"
+path = "examples/tutorials/event_sourced/04_postgres.rs"

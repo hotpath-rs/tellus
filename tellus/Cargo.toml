@@ -39,6 +39,7 @@ uuid            = { workspace = true, features = [ "v7" ] }
 
 [dev-dependencies]
 anyhow             = { workspace = true }
+config             = { workspace = true, features = [ "toml" ] }
 criterion          = { workspace = true, features = [ "async_tokio" ] }
 serde              = { workspace = true, features = [ "derive" ] }
 serde_json         = { workspace = true }
@@ -74,8 +75,32 @@ name = "getting_started_07_device_manager"
 path = "examples/tutorials/getting_started/07_device_manager.rs"
 
 [[example]]
+name              = "event_sourced_01_device"
+path              = "examples/tutorials/event_sourced/01_device.rs"
+required-features = [ "persistence-in-memory" ]
+
+[[example]]
+name              = "event_sourced_02_supervision"
+path              = "examples/tutorials/event_sourced/02_supervision.rs"
+required-features = [ "persistence-in-memory" ]
+
+[[example]]
+name              = "event_sourced_03_snapshots"
+path              = "examples/tutorials/event_sourced/03_snapshots.rs"
+required-features = [ "persistence-in-memory" ]
+
+[[example]]
 name = "how_to_call_async_code"
 path = "examples/how_to/call_async_code.rs"
+
+[[example]]
+name              = "how_to_configure_supervision"
+path              = "examples/how_to/configure_supervision.rs"
+required-features = [ "serde" ]
+
+[[example]]
+name = "explanation_state_machine"
+path = "examples/explanation/state_machine.rs"
 
 [[example]]
 name              = "profile"

@@ -69,6 +69,7 @@ impl Actor for Group {
         };
 
         match message {
+            // ANCHOR: record
             GroupMessage::Record {
                 device_name,
                 degrees,
@@ -80,6 +81,7 @@ impl Actor for Group {
                 Ok(Control::Continue(devices))
             }
 
+            // ANCHOR_END: record
             GroupMessage::Read {
                 device_name,
                 reply_to,

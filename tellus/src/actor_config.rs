@@ -42,6 +42,10 @@ impl ActorConfig {
 }
 
 /// The capacity of an actor's mailbox.
+///
+/// Prefer [Bounded](Self::Bounded), sized by the number of messages the protocol allows in flight
+/// or, failing that, by the largest burst the actor should absorb. The default is
+/// [Unbounded](Self::Unbounded) only because no capacity fits every actor.
 #[derive(Debug, Default, Clone, Copy)]
 #[cfg_attr(
     feature = "serde",
