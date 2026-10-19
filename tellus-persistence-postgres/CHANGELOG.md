@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6](https://github.com/tellus-rs/tellus/compare/tellus-persistence-postgres-v0.2.5...tellus-persistence-postgres-v0.2.6) - 2026-10-19
+
+### Other
+
+- add event-sourced tutorial, how-tos and explanation examples
+
 ## [0.2.5](https://github.com/tellus-rs/tellus/compare/tellus-persistence-postgres-v0.2.4...tellus-persistence-postgres-v0.2.5) - 2026-10-18
 
 ### Other
