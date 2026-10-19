@@ -20,6 +20,11 @@ Benchmarks:
 - `just bench`: tellus's own criterion regression benchmarks, messaging (`tellus/benches/messaging.rs`) and persistence against an in-memory store (`tellus/benches/persistence.rs`, features `persistence` and `persistence-in-memory`); `just bench-save <baseline>` / `just bench-compare <baseline>` and the `bench-persistence-*` pair for local before/after comparisons. CI benchmarks every PR against its merge base, both benches, and posts the comparison as an informational PR comment; it does not fail the build. The report flags a benchmark whose 95% confidence lower bound exceeds `bench_regression_threshold`, but that verdict is not gate-grade on a shared CI runner: `flood/bounded` measured +19.9%, +13.3%, -9.5%, -35.7% and +8.1% across five runs of identical code, each with a tight criterion confidence interval, because criterion sees within-run variance only. Pushes to `main` additionally publish both benches to the gh-pages dashboard (`dev/bench`) via `bench-bencher` and `bench-persistence-bencher`, one section per store-result step name: "Core" (messaging) and "Persistence". Adding a section means a bencher recipe plus a benchmark and a store-result step in `bench.yml`; `dev/bench/index.html` on `gh-pages` is a customized copy of the action's default page (headline plus one sub-heading per section) which the action leaves alone once it exists.
 - `just comparison` plus `comparison-check` / `comparison-lint`: the `tellus-comparison` crate benchmarking tellus against kameo and ractor. It is deliberately excluded from `just all` and from per-PR CI so its dependencies stay out of tellus's build; touching it means running its own check and lint recipes.
 
+Releases:
+
+- release-plz opens or updates a release PR whenever `main` has unreleased changes; merging it publishes the crates and tags them (`tellus-vX.Y.Z`, `tellus-persistence-postgres-vX.Y.Z`).
+- After every release, pin the website's submodule to the new tag with `just pin-tellus tellus-vX.Y.Z` in [tellus-rs.github.io](https://github.com/tellus-rs/tellus-rs.github.io). The site shows code from the examples and tests of the pinned tag and reads the version it displays from there.
+
 CI enforces that a PR consists of exactly one commit; squash before pushing.
 
 ## Workspace layout
