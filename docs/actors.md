@@ -118,6 +118,11 @@ An unbounded mailbox never drops messages, but an actor which cannot keep up gro
 limit. A bounded mailbox applies no backpressure: sends to a full mailbox fail as dead letters,
 while terminated signals are still delivered.
 
+Prefer a bounded mailbox: its capacity caps the memory, and every dropped message shows up as a
+dead letter at warn level instead of as a growing process. Size it by the number of messages the
+protocol allows in flight or, failing that, by the largest burst the actor should absorb. The
+default is unbounded only because no capacity fits every actor.
+
 The `serde` feature makes the whole configuration deserializable, so it can come from a config file.
 The one invariant it carries, `min <= max` on the backoff bounds, lives in
 [`Backoff`](../tellus/src/backoff.rs): its fields are private and its constructor is fallible, and

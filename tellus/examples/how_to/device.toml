@@ -1,0 +1,6 @@
+mailbox_capacity = { bounded = 100 }
+
+[supervision_strategy.restart]
+max_restarts = 3
+reset_after  = "30s"
+backoff      = { min = "250ms", max = "4s" }

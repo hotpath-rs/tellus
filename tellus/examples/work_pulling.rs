@@ -1,7 +1,8 @@
 //! Work pulling: the manager owns a queue of jobs and each worker requests the next job whenever
 //! it is ready, carrying a `ReplyTo` which is single-shot, so one request gets at most one job.
 //! A worker thus never has more than one job in flight, which makes a bounded mailbox of capacity
-//! one provably sufficient: backpressure by design, without dropping work.
+//! one provably sufficient: backpressure by design, without dropping work. Likewise, the manager
+//! never holds more requests than there are workers, which bounds its mailbox.
 //!
 //! The word counts are printed to stdout and tellus logs to stderr; the log level is configured
 //! via `RUST_LOG`, e.g. `RUST_LOG=tellus=debug cargo run --quiet -p tellus --example
@@ -28,13 +29,17 @@ const DOCUMENTS: [&str; 6] = [
     "a terminated signal arrives behind all messages",
 ];
 
-const WORKERS: usize = 3;
+const WORKERS: NonZeroUsize = NonZeroUsize::new(3).unwrap();
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let system = ActorSystem::new(Manager);
+    // ANCHOR: system
+    // Each worker has at most one request in flight, so capacity `WORKERS` never drops.
+    let config = ActorConfig::default().with_mailbox_capacity(MailboxCapacity::Bounded(WORKERS));
+    let system = ActorSystem::with_config(Manager, config);
+    // ANCHOR_END: system
 
     system
         .terminated()
@@ -62,11 +67,12 @@ impl Actor for Manager {
     type Error = Infallible;
 
     fn init(&self, context: &ActorContext<Self::Message>) -> Result<Self::State, Self::Error> {
+        // ANCHOR: spawn
         // A worker has at most one job in flight, so a mailbox of capacity one never drops.
         let config = ActorConfig::default()
             .with_mailbox_capacity(MailboxCapacity::Bounded(NonZeroUsize::MIN));
 
-        for _ in 0..WORKERS {
+        for _ in 0..WORKERS.get() {
             let worker = context.spawn_with_config(
                 Worker {
                     manager: context.self_ref().clone(),
@@ -75,9 +81,10 @@ impl Actor for Manager {
             );
             context.watch(&worker);
         }
+        // ANCHOR_END: spawn
         Ok(Managing {
             jobs: DOCUMENTS.to_vec(),
-            workers: WORKERS,
+            workers: WORKERS.get(),
         })
     }
 
@@ -88,6 +95,7 @@ impl Actor for Manager {
         state: Self::State,
     ) -> Result<Control<Self::State>, Self::Error> {
         match incoming {
+            // ANCHOR: hand-out
             Incoming::Message(RequestJob(reply_to)) => {
                 let mut jobs = state.jobs;
                 match jobs.pop() {
@@ -97,6 +105,7 @@ impl Actor for Manager {
                 Ok(Control::Continue(Managing { jobs, ..state }))
             }
 
+            // ANCHOR_END: hand-out
             Incoming::Terminated(_) => {
                 let workers = state.workers - 1;
 
@@ -142,6 +151,7 @@ impl Actor for Worker {
             unreachable!("the worker watches no actor, hence never gets a terminated signal")
         };
 
+        // ANCHOR: work
         match next {
             Next::Job(document) => {
                 let words = document.split_whitespace().count();
@@ -153,15 +163,18 @@ impl Actor for Worker {
 
             Next::Drained => Ok(Control::Stop),
         }
+        // ANCHOR_END: work
     }
 }
 
+// ANCHOR: request
 impl Worker {
     fn request_job(&self, context: &ActorContext<Next>) {
         // The reply already is this worker's message type, so it converts via `identity`.
         self.manager.tell(RequestJob(context.reply_to(identity)));
     }
 }
+// ANCHOR_END: request
 
 enum Next {
     Job(&'static str),
