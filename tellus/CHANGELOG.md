@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.5...tellus-v0.3.6) - 2026-10-19
+
+### Other
+
+- add event-sourced tutorial, how-tos and explanation examples
+- fix flaky error formatting assertions with a global subscriber
+
 ## [0.3.5](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.4...tellus-v0.3.5) - 2026-10-18
 
 ### Fixed
