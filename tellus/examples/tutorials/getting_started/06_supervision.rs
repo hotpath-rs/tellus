@@ -15,7 +15,9 @@ use tellus::{
 use thiserror::Error;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+// ANCHOR: max-restarts
 const MAX_RESTARTS: NonZeroU32 = NonZeroU32::new(3).expect("3 is not zero");
+// ANCHOR_END: max-restarts
 
 // ANCHOR: main
 #[tokio::main]
