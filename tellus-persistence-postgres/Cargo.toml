@@ -8,6 +8,8 @@ readme        = "README.md"
 homepage      = { workspace = true }
 repository    = { workspace = true }
 documentation = "https://docs.rs/tellus-persistence-postgres/latest/tellus_persistence_postgres/"
+keywords      = [ "actor", "event-sourcing", "persistence", "postgres", "tellus" ]
+categories    = [ "database", "asynchronous" ]
 publish       = true
 
 [dependencies]
