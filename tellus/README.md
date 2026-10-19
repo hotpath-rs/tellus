@@ -187,9 +187,9 @@ was already enqueued.
 Each actor is configured with a `SupervisionStrategy` deciding what happens when `init` or
 `receive` returns an error or panics: `Stop` terminates the actor, `Restart` stops its children and
 re-runs `init` for a fresh state, limited and paced by a `RestartPolicy`: restarts back off
-exponentially between the backoff's `min` and `max`, more than `max_restarts` failures in a
-streak stop the actor, and running for `reset_after` without failure ends the streak. Failures are
-logged at error level either way.
+exponentially between the backoff's `min` and `max`, the actor stops when it fails again after
+`max_restarts` restarts, and running for `reset_after` without failure resets that count. Failures
+are logged at error level either way.
 
 ### Configuration
 

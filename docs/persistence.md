@@ -113,7 +113,7 @@ supervision.
 
 Failures during recovery divide in two: a failure of `init`, `init_from_snapshot`, event
 decoding or `apply` is deterministic, a restart fails identically, and so it escalates through
-the restart streak to a stop; an undecodable snapshot is the one exception, discarded in favor of
+repeated restarts to a stop; an undecodable snapshot is the one exception, discarded in favor of
 full replay (see schema evolution below). A failure of `recovered`, or a failure or panic of a
 store itself while loading the snapshot or reading events, is an ordinary startup failure, e.g. a
 struggling

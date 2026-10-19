@@ -47,9 +47,9 @@ async fn err_under_stop_terminates_system() {
     terminates_after_failure(FailureTrigger::Err).await;
 }
 
-/// A panic in `init` on the restart path counts into the streak like any other failure; once the
-/// limit is exceeded the actor terminates, so that watchers (and hence the actor system) learn
-/// about it instead of waiting forever.
+/// A panic in `init` on the restart path counts like any other failure; once the limit is
+/// exceeded the actor terminates, so that watchers (and hence the actor system) learn about it
+/// instead of waiting forever.
 #[tokio::test]
 async fn panic_in_init_under_restart_terminates_system() {
     terminates_after_failing_reinitialization(FailureTrigger::Panic).await;
@@ -128,8 +128,8 @@ async fn watches_survive_a_restart() {
         .expect("watching the root actor failed");
 }
 
-/// Failing more often than `max_restarts` within one streak stops the actor; `reset_after` is far
-/// away here, so every failure counts into the same streak.
+/// Failing more often than `max_restarts` stops the actor; `reset_after` is far away here, so every
+/// failure counts.
 #[tokio::test]
 async fn exceeding_the_restart_limit_terminates_system() {
     let (counter, _reported_rx) = counter(FailureTrigger::Err);
@@ -148,11 +148,11 @@ async fn exceeding_the_restart_limit_terminates_system() {
         .expect("watching the root actor failed");
 }
 
-/// Running without failure for at least `reset_after` ends the streak: with a zero `reset_after`
-/// every successful `init` resets the count, so the actor survives more failures than
-/// `max_restarts`.
+/// Running without failure for at least `reset_after` resets the restart count: with a zero
+/// `reset_after` every successful `init` resets the count, so the actor survives more failures
+/// than `max_restarts`.
 #[tokio::test]
-async fn running_resets_the_restart_streak() {
+async fn running_resets_the_restart_count() {
     let (counter, mut reported_rx) = counter(FailureTrigger::Err);
     let system = ActorSystem::with_config(counter, config(restart_strategy(1, Duration::ZERO)));
 
