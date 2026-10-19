@@ -8,7 +8,7 @@ use std::{
     future::pending,
     num::{NonZeroU32, NonZeroUsize},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Once,
         atomic::{AtomicBool, Ordering::SeqCst},
     },
     time::Duration,
@@ -26,6 +26,8 @@ use tokio::{
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+static TRACING: Once = Once::new();
 
 /// Replay reconstructs the live state: a counter increments across single and atomic multi-event
 /// effects, persists a final event while stopping, and a second incarnation over the same store
@@ -761,8 +763,7 @@ fn encoded(event: &Increased) -> EncodedEvent {
 /// unwind.
 #[tokio::test]
 async fn a_panicking_append_error_is_contained() {
-    let _subscriber =
-        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+    init_tracing();
     let store = FaultyStore::default()
         .with_append_failures(1)
         .with_panicking_errors();
@@ -805,8 +806,7 @@ async fn a_panicking_append_error_is_contained() {
 /// panic: the actor keeps handling commands without restarting.
 #[tokio::test]
 async fn a_panicking_snapshot_save_error_keeps_the_actor_running() {
-    let _subscriber =
-        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+    init_tracing();
     let store = FaultyStore::default()
         .with_failing_saves()
         .with_panicking_errors();
@@ -843,6 +843,16 @@ async fn a_panicking_snapshot_save_error_keeps_the_actor_running() {
         }
     }
     assert_eq!(inits, 1, "the actor must not restart");
+}
+
+/// Global, as a thread-local subscriber races with the callsite interest cache of parallel tests.
+fn init_tracing() {
+    TRACING.call_once(|| {
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt().with_test_writer().finish(),
+        )
+        .expect("no other global subscriber is set");
+    });
 }
 
 async fn recv<T>(probe_rx: &mut mpsc::UnboundedReceiver<T>, not_received: &str) -> T {

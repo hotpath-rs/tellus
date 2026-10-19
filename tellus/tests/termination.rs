@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fmt::{self, Debug, Display, Formatter},
     sync::{
-        Arc,
+        Arc, Once,
         atomic::{AtomicBool, Ordering::SeqCst},
     },
     time::Duration,
@@ -15,6 +15,8 @@ use tokio::{sync::mpsc, time::timeout};
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SELF_SENDS: usize = 1_000;
 const TERMINATION_ORDER: &[&str] = &["grandchild", "child", "root"];
+
+static TRACING: Once = Once::new();
 
 /// An actor system terminates once its root actor has stopped.
 #[tokio::test]
@@ -241,8 +243,7 @@ async fn panicking_error_display_and_drop_are_contained_separately() {
 
 /// Without a subscriber which formats fields, a logged error is never formatted.
 async fn assert_failure_terminates(failing: Failing, panics: Panics) -> Arc<Hooks> {
-    let _subscriber =
-        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+    init_tracing();
 
     let hooks = Arc::new(Hooks::new(panics));
     let system = ActorSystem::new(HostileFailure {
@@ -255,6 +256,16 @@ async fn assert_failure_terminates(failing: Failing, panics: Panics) -> Arc<Hook
 
     assert_terminates(system).await;
     hooks
+}
+
+/// Global, as a thread-local subscriber races with the callsite interest cache of parallel tests.
+fn init_tracing() {
+    TRACING.call_once(|| {
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt().with_test_writer().finish(),
+        )
+        .expect("no other global subscriber is set");
+    });
 }
 
 async fn recv<T>(rx: &mut mpsc::Receiver<T>, not_received: &str) -> T {
