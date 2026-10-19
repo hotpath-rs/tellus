@@ -1,6 +1,6 @@
 [package]
 name          = "tellus"
-description   = "A resilient world of actors for Rust: typed messages, supervision trees, death watch, event sourcing."
+description   = "An actor framework for Rust: typed messages, supervision trees, death watch, event sourcing."
 version       = "0.3.6"
 edition       = { workspace = true }
 license       = { workspace = true }
@@ -8,6 +8,8 @@ readme        = "README.md"
 homepage      = { workspace = true }
 repository    = { workspace = true }
 documentation = "https://docs.rs/tellus/latest/tellus/"
+keywords      = [ "actor", "actors", "actor-model", "supervision", "event-sourcing" ]
+categories    = [ "concurrency", "asynchronous" ]
 publish       = true
 
 [package.metadata.docs.rs]

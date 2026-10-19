@@ -1,4 +1,5 @@
-//! An actor framework.
+//! An actor framework for Rust, built on Tokio: typed messages, supervision trees, death watch
+//! and event sourcing.
 //!
 //! An actor is created by implementing [Actor]: [Actor::init] creates its initial state and
 //! [Actor::receive] applies received messages and signals to that state until it returns
