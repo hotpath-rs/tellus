@@ -136,10 +136,12 @@ impl Actor for Worker {
     type State = ();
     type Error = Infallible;
 
+    // ANCHOR: init
     fn init(&self, context: &ActorContext<Self::Message>) -> Result<Self::State, Self::Error> {
         self.request_job(context);
         Ok(())
     }
+    // ANCHOR_END: init
 
     fn receive(
         &self,
@@ -170,7 +172,7 @@ impl Actor for Worker {
 // ANCHOR: request
 impl Worker {
     fn request_job(&self, context: &ActorContext<Next>) {
-        // The reply already is this worker's message type, so it converts via `identity`.
+        // The reply is already this worker's message type, so it converts via `identity`.
         self.manager.tell(RequestJob(context.reply_to(identity)));
     }
 }

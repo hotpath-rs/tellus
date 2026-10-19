@@ -28,8 +28,8 @@ async fn main() -> anyhow::Result<()> {
     let readings = [
         ("attic", "left", 21.5),
         ("attic", "right", 19.1),
-        ("cellar", "main", 11.0),
-        ("cellar", "main", f64::NAN),
+        ("cellar", "boiler", 11.0),
+        ("cellar", "boiler", f64::NAN),
     ];
     for (group_name, device_name, degrees) in readings {
         manager.tell(Command::Record {
