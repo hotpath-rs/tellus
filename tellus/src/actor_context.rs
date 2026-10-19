@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(PanicPayload(&42).to_string(), "<non-string panic payload>");
     }
 
-    /// Under `Stop` a failure is never retried, whatever the streak looks like.
+    /// Under `Stop` a failure is never retried, whatever the restart count.
     #[test]
     fn stop_never_restarts() {
         let mut restarts = 0;
@@ -652,10 +652,10 @@ mod tests {
         assert_eq!(restarts, 0);
     }
 
-    /// The n-th restart of a streak is delayed by the backoff's `min * 2^(n-1)`, capped at its
-    /// `max`, and each one advances the streak by exactly one.
+    /// The n-th counted restart is delayed by the backoff's `min * 2^(n-1)`, capped at its `max`,
+    /// and each one increments the restart count by exactly one.
     #[test]
-    fn the_delay_doubles_and_advances_the_streak() {
+    fn the_delay_doubles_and_increments_the_count() {
         let strategy = restart(NonZeroU32::MAX);
         let mut restarts = 0;
 
@@ -668,8 +668,8 @@ mod tests {
         assert_eq!(restarts, 5);
     }
 
-    /// One failure more than `max_restarts` within a streak stops the actor rather than restarting
-    /// it again.
+    /// A failure after `max_restarts` counted restarts stops the actor rather than restarting it
+    /// again.
     #[test]
     fn exceeding_the_limit_stops() {
         let strategy = restart(NonZeroU32::new(2).expect("2 is not zero"));
@@ -689,10 +689,10 @@ mod tests {
         );
     }
 
-    /// Running for at least `reset_after` ends the streak, so an actor which keeps recovering is
-    /// restarted indefinitely instead of exhausting its limit.
+    /// Running for at least `reset_after` resets the restart count, so an actor which keeps
+    /// recovering is restarted indefinitely instead of exhausting its limit.
     #[tokio::test]
-    async fn running_long_enough_resets_the_streak() {
+    async fn running_long_enough_resets_the_count() {
         let strategy = restart(NonZeroU32::MIN);
         let mut restarts = 7;
 
@@ -703,8 +703,8 @@ mod tests {
         assert_eq!(restarts, 1);
     }
 
-    /// A policy which resets on any uptime at all, so the streak is governed by the call sequence
-    /// rather than by wall clock time.
+    /// A policy which resets on any uptime at all, so the restart count is governed by the call
+    /// sequence rather than by wall clock time.
     fn restart(max_restarts: NonZeroU32) -> SupervisionStrategy {
         SupervisionStrategy::Restart(RestartPolicy {
             max_restarts,

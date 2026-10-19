@@ -296,11 +296,11 @@ by the restarted state and keep queuing during the backoff; the failing message 
 and not redelivered. Before restarting, the loop probes whether the parent has meanwhile started
 stopping and stops instead; the parent stopping also interrupts a backoff delay in progress.
 
-Failures form a streak: the n-th restart within a streak is delayed by `backoff.min() * 2^(n-1)`
-([`backoff.rs`](../tellus/src/backoff.rs)), capped at `backoff.max()`; once a streak exceeds
-`max_restarts`, the actor stops, which is how a persistent failure escalates to the watchers. A
-streak ends, resetting count and backoff, once the actor has run for at least `reset_after`
-without failing. Failures of `init` count into the same streak, including the first
+Restarts are counted: the n-th counted restart is delayed by `backoff.min() * 2^(n-1)`
+([`backoff.rs`](../tellus/src/backoff.rs)), capped at `backoff.max()`. When the actor fails again
+after `max_restarts` counted restarts, it stops, which is how a persistent failure escalates to the
+watchers. The restart count, and with it the backoff, resets once the actor has run for at least
+`reset_after` without failing. Failures of `init` count the same way, including the first
 initialization at spawn, so a failing initializer, e.g. one connecting to a struggling
 dependency, is retried with backoff instead of looping hot.
 

@@ -89,10 +89,10 @@ pub enum SupervisionStrategy {
 /// The limit and pacing for restarts, applied to failures of [Actor::receive] and [Actor::init]
 /// alike, including the first initialization at spawn.
 ///
-/// Failures form a streak: the n-th restart within a streak is delayed by `backoff.min() *
-/// 2^(n-1)`, capped at `backoff.max()`; once a streak exceeds `max_restarts`, the actor stops, so
-/// persistent failure escalates to the watchers. A streak ends, resetting count and backoff, once
-/// the actor has run for at least `reset_after` without failing.
+/// Restarts are counted: the n-th counted restart is delayed by `backoff.min() * 2^(n-1)`, capped
+/// at `backoff.max()`. When the actor fails again after `max_restarts` counted restarts, it stops,
+/// so persistent failure escalates to the watchers. The restart count, and with it the backoff,
+/// resets once the actor has run for at least `reset_after` without failing.
 ///
 /// [Actor::init]: crate::Actor::init
 /// [Actor::receive]: crate::Actor::receive
@@ -103,14 +103,14 @@ pub enum SupervisionStrategy {
     serde(deny_unknown_fields)
 )]
 pub struct RestartPolicy {
-    /// The maximum number of restarts within a streak; one more failure stops the actor.
+    /// The maximum number of counted restarts; one more failure stops the actor.
     pub max_restarts: NonZeroU32,
 
-    /// The bounds pacing the restarts of a streak. Defaults to [Backoff::default].
+    /// The bounds pacing the counted restarts. Defaults to [Backoff::default].
     #[cfg_attr(feature = "serde", serde(default))]
     pub backoff: Backoff,
 
-    /// Running this long without failure ends the streak. Defaults to
+    /// Running this long without failure resets the restart count. Defaults to
     /// [RestartPolicy::DEFAULT_RESET_AFTER].
     #[cfg_attr(
         feature = "serde",
@@ -133,12 +133,12 @@ impl RestartPolicy {
         }
     }
 
-    /// This policy, pacing the restarts of a streak by the given [Backoff].
+    /// This policy, pacing the counted restarts by the given [Backoff].
     pub fn with_backoff(self, backoff: Backoff) -> Self {
         Self { backoff, ..self }
     }
 
-    /// This policy, ending a streak once the actor has run this long without failing.
+    /// This policy, resetting the restart count once the actor has run this long without failing.
     pub fn with_reset_after(self, reset_after: Duration) -> Self {
         Self {
             reset_after,
