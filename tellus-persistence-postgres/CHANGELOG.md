@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/tellus-rs/tellus/compare/tellus-persistence-postgres-v0.2.6...tellus-persistence-postgres-v0.2.7) - 2026-10-19
+
+### Other
+
+- add crate keywords and categories for search
+
 ## [0.2.6](https://github.com/tellus-rs/tellus/compare/tellus-persistence-postgres-v0.2.5...tellus-persistence-postgres-v0.2.6) - 2026-10-19
 
 ### Other

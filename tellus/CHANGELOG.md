@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.6...tellus-v0.3.7) - 2026-10-19
+
+### Other
+
+- add crate keywords and categories for search
+
 ## [0.3.6](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.5...tellus-v0.3.6) - 2026-10-19
 
 ### Other
