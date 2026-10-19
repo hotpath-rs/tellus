@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.8...tellus-v0.3.9) - 2026-10-19
+
+### Other
+
+- describe restarts by their count instead of a streak
+
 ## [0.3.8](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.7...tellus-v0.3.8) - 2026-10-19
 
 ### Other
