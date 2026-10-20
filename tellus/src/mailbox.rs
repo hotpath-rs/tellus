@@ -35,6 +35,10 @@ impl<M> MailboxHandle<M> {
         &self.watcher_registry
     }
 
+    pub(crate) fn queued(&self) -> usize {
+        self.incoming_tx.len()
+    }
+
     pub(crate) fn terminated_handler(&self) -> Arc<dyn TerminatedHandler>
     where
         M: Send + 'static,
@@ -331,5 +335,30 @@ mod tests {
 
         drop(mailbox);
         assert!(watcher.handle_terminated(actor_id).is_err());
+    }
+
+    /// The depth counts every item still in the queue, a forced message and a terminated signal
+    /// like a counted message, and goes down as items are received.
+    #[tokio::test]
+    async fn queued_is_the_number_of_items_in_the_queue() {
+        let (mailbox_handle, mut mailbox) = make_mailbox::<()>(MailboxCapacity::Unbounded);
+        assert_eq!(mailbox_handle.queued(), 0);
+
+        assert!(mailbox_handle.try_send_message(()).is_ok());
+        assert!(mailbox_handle.try_send_forced_message(()).is_ok());
+        assert!(
+            mailbox_handle
+                .terminated_handler()
+                .handle_terminated(ActorId::new())
+                .is_ok()
+        );
+        assert_eq!(mailbox_handle.queued(), 3);
+
+        assert!(mailbox.recv().await.is_some());
+        assert_eq!(mailbox_handle.queued(), 2);
+
+        assert!(mailbox.recv().await.is_some());
+        assert!(mailbox.recv().await.is_some());
+        assert_eq!(mailbox_handle.queued(), 0);
     }
 }
