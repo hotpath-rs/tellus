@@ -218,12 +218,12 @@ async fn parent_stop_cancels_backoff() {
         .expect("watching the root actor failed");
 }
 
-/// The parent stopping while a zero-backoff restart stops the failed actor's children must be
-/// honored once they are stopped, without another `init` cycle: the restarting actor is held in
-/// `stop_children` by a child blocked in its `init`, the parent is stopped meanwhile, and once the
-/// child is unblocked the actor must terminate without reinitializing. A stop landing before the
-/// restart's first probe passes vacuously, but the actor enters `stop_children` without an await
-/// point after acking its failure, so the raced window is hit reliably.
+/// A parent stopped while a zero-backoff restart is stopping the failed actor's children must be
+/// honored once they are stopped, without another `init` cycle. Here the restarting actor is held
+/// in `stop_children` by a child blocked in its `init`, the parent is stopped meanwhile, and once
+/// the child is unblocked the actor must terminate without reinitializing. A stop landing before
+/// the restart's first probe passes vacuously, but the actor enters `stop_children` without an
+/// await point after acking its failure, so the raced window is hit reliably.
 #[tokio::test(flavor = "multi_thread")]
 async fn parent_stop_during_restart_stop_children_skips_reinit() {
     let inits = Arc::new(AtomicUsize::new(0));
@@ -345,7 +345,7 @@ fn backoff_strategy(
 ) -> SupervisionStrategy {
     SupervisionStrategy::Restart(RestartPolicy {
         max_restarts,
-        backoff: Backoff::new(min_backoff, max_backoff).expect("the bounds are ordered"),
+        backoff: Backoff::new(min_backoff, max_backoff).expect("the bounds are valid"),
         reset_after: Duration::ZERO,
     })
 }
@@ -353,7 +353,8 @@ fn backoff_strategy(
 fn restart_strategy(max_restarts: u32, reset_after: Duration) -> SupervisionStrategy {
     SupervisionStrategy::Restart(RestartPolicy {
         max_restarts: NonZeroU32::new(max_restarts).expect("max_restarts is not zero"),
-        backoff: Backoff::new(Duration::ZERO, Duration::ZERO).expect("the bounds are ordered"),
+        backoff: Backoff::new(Duration::from_nanos(1), Duration::from_nanos(1))
+            .expect("the bounds are valid"),
         reset_after,
     })
 }

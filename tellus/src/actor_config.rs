@@ -58,8 +58,7 @@ pub enum MailboxCapacity {
     #[default]
     Unbounded,
 
-    /// Messages sent to a full mailbox are dropped and logged as dead letters, but a terminated
-    /// signal is still delivered.
+    /// Messages sent to a full mailbox are dropped and logged as dead letters.
     Bounded(NonZeroUsize),
 }
 
@@ -78,9 +77,8 @@ pub enum SupervisionStrategy {
     /// Stop the child actors and replace the current state with a newly initialized one, limited
     /// and paced by the given [RestartPolicy].
     ///
-    /// [Actor::init] is re-run on the same actor value: anything the actor itself carries, e.g.
-    /// via interior mutability, survives the restart; only the state is rebuilt. That includes
-    /// whatever a caught panic left behind, e.g. a poisoned mutex.
+    /// [Actor::init] is re-run on the same actor value: anything the actor itself carries survives
+    /// the restart; only the state is rebuilt.
     ///
     /// [Actor::init]: crate::Actor::init
     Restart(RestartPolicy),
@@ -160,6 +158,9 @@ mod tests {
         time::Duration,
     };
 
+    const MIN_BACKOFF: Duration = Duration::from_millis(1);
+    const MAX_BACKOFF: Duration = Duration::from_millis(10);
+
     /// A new policy is paced by the defaults its documentation names, so a caller only has to
     /// overwrite what it wants to differ.
     #[test]
@@ -193,14 +194,14 @@ mod tests {
     /// Each setter overwrites its own field and leaves the others as they were.
     #[test]
     fn a_policy_setter_only_overwrites_its_own_field() {
-        let backoff = Backoff::new(Duration::ZERO, Duration::ZERO).expect("the bounds are ordered");
+        let backoff = Backoff::new(MIN_BACKOFF, MAX_BACKOFF).expect("the bounds are valid");
         let policy = RestartPolicy::new(NonZeroU32::MIN)
             .with_backoff(backoff)
             .with_reset_after(Duration::ZERO);
 
         assert_eq!(policy.max_restarts, NonZeroU32::MIN);
-        assert_eq!(policy.backoff.min(), Duration::ZERO);
-        assert_eq!(policy.backoff.max(), Duration::ZERO);
+        assert_eq!(policy.backoff.min(), MIN_BACKOFF);
+        assert_eq!(policy.backoff.max(), MAX_BACKOFF);
         assert_eq!(policy.reset_after, Duration::ZERO);
     }
 
@@ -229,6 +230,22 @@ mod tests {
         assert_eq!(policy.reset_after, Duration::from_secs(60));
         assert_eq!(policy.backoff.min(), Backoff::DEFAULT_MIN);
         assert_eq!(policy.backoff.max(), Backoff::DEFAULT_MAX);
+    }
+
+    /// A restart policy without `reset_after` deserializes with the default [RestartPolicy::new]
+    /// names, since serde fills it in apart from the constructor.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn an_omitted_reset_after_takes_the_default() {
+        let config = serde_json::from_str::<ActorConfig>(
+            r#"{ "supervision_strategy": { "restart": { "max_restarts": 3 } } }"#,
+        )
+        .expect("reset_after is optional");
+
+        let SupervisionStrategy::Restart(policy) = config.supervision_strategy else {
+            panic!("expected a restart strategy")
+        };
+        assert_eq!(policy.reset_after, RestartPolicy::DEFAULT_RESET_AFTER);
     }
 
     /// A misspelled key must be an error, not a silently applied default.

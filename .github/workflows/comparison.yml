@@ -53,11 +53,11 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: just comparison-check comparison-lint
+      - name: just check-comparison lint-comparison
         run: |
           rustup override set ${{ needs.toolchain.outputs.stable }}
-          just comparison-check
-          just comparison-lint
+          just check-comparison
+          just lint-comparison
 
   publish:
     name: Publish comparison
@@ -101,11 +101,11 @@ jobs:
       - name: Benchmark
         run: |
           rustup override set ${{ needs.toolchain.outputs.stable }}
-          just comparison
+          just bench-comparison
 
       - name: Report
         run: |
-          just comparison-report ${{ steps.resolve.outputs.tag }}
+          just bench-comparison-report ${{ steps.resolve.outputs.tag }}
 
       - name: Publish to gh-pages
         env:
