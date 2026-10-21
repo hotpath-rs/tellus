@@ -1,7 +1,7 @@
 use crate::{
     ActorId,
     cluster::{
-        endpoint::EndpointInner,
+        endpoint::{EndpointInner, InboundSlot, MemberAdmission},
         failure::PeerLiveness,
         frame::{
             Frame, Handshake, HandshakeEnvelope, HandshakeError, HandshakeIntent, HandshakeV1,
@@ -328,10 +328,17 @@ impl InboundDrain {
 /// A spoofed identity gets no answer, so the connection is dropped silently rather than refused
 /// with a message.
 enum Admission {
-    Admit(PeerLiveness),
+    Admit(PeerLiveness, InboundSlot),
     Probe,
     Refuse(RefusalReason),
     Drop,
+}
+
+/// What an admitted connection hands its reader: the peer's liveness and its place among the
+/// peer's inbound connections.
+struct Admitted {
+    liveness: PeerLiveness,
+    inbound: InboundSlot,
 }
 
 /// The handshake is bounded by the heartbeat interval, so an unauthenticated dialer cannot pin
@@ -376,8 +383,8 @@ where
         } = greeting;
 
         let admission = admit_inbound(peer, intent, cluster, connection.peer_identity(), endpoint);
-        let liveness = match admission {
-            Admission::Admit(liveness) => liveness,
+        let (liveness, inbound) = match admission {
+            Admission::Admit(liveness, inbound) => (liveness, inbound),
 
             Admission::Probe => {
                 let reply =
@@ -427,7 +434,14 @@ where
             }
         }
 
-        Some((frame_sender, frame_receiver, peer, version, liveness))
+        Some((
+            frame_sender,
+            frame_receiver,
+            peer,
+            version,
+            liveness,
+            inbound,
+        ))
     })
     .await;
 
@@ -439,7 +453,7 @@ where
             return;
         }
     };
-    let Some((frame_sender, frame_receiver, peer, version, liveness)) = established else {
+    let Some((frame_sender, frame_receiver, peer, version, liveness, inbound)) = established else {
         return;
     };
     debug!(%peer, version, "inbound connection established");
@@ -452,7 +466,7 @@ where
                 frame_receiver,
                 frame_sender,
                 peer,
-                liveness,
+                Admitted { liveness, inbound },
                 endpoint,
                 shutdown_rx,
             ))
@@ -471,14 +485,18 @@ async fn read_streams<C>(
     control_rx: C::Receiver,
     mut frame_sender: C::Sender,
     peer: NodeId,
-    liveness: PeerLiveness,
+    admitted: Admitted,
     endpoint: &'static EndpointInner,
     mut shutdown_rx: tokio::sync::watch::Receiver<()>,
 ) where
     C: Connection,
 {
+    let Admitted {
+        liveness,
+        mut inbound,
+    } = admitted;
+    inbound.reading();
     let mut sever_rx = endpoint.sever_rx();
-    endpoint.inbound_opened(peer);
 
     let mut readers = JoinSet::new();
     let control = readers
@@ -553,7 +571,7 @@ async fn read_streams<C>(
 
     readers.shutdown().await;
     drop(frame_sender);
-    endpoint.inbound_closed(peer);
+    drop(inbound);
 }
 
 /// Abort and await the reader before the next dial, or two readers can overlap.
@@ -716,7 +734,7 @@ where
             }
         }
 
-        if !endpoint.is_lane_open(addr, lane_id) {
+        if !endpoint.is_lane_open(addr, lane_id) && !endpoint.leaving() {
             break;
         }
     }
@@ -740,7 +758,16 @@ async fn backoff_or_give_up(endpoint: &EndpointInner, addr: SocketAddr, attempts
         return false;
     }
 
-    sleep(endpoint.reconnect_backoff(attempts)).await;
+    let backoff = sleep(endpoint.reconnect_backoff(attempts));
+    if endpoint.leaving() {
+        backoff.await;
+    } else {
+        let mut leave_rx = endpoint.leave_rx();
+        select! {
+            () = backoff => {}
+            _ = leave_rx.wait_for(|leaving| *leaving) => {}
+        }
+    }
     true
 }
 
@@ -1261,20 +1288,32 @@ fn admit_inbound(
         endpoint.sight_cluster(peer.addr(), Some(cluster));
         return Admission::Refuse(RefusalReason::ForeignCluster);
     }
-    if endpoint.membership().is_down(peer) {
+    if intent != HandshakeIntent::Member && endpoint.membership().is_down(peer) {
         warn!(%peer, "refusing connection, dead node incarnation");
         return Admission::Refuse(RefusalReason::Down);
     }
 
     match intent {
-        HandshakeIntent::Member => {
-            if endpoint.membership().is_up(peer) {
-                Admission::Admit(endpoint.track_liveness(peer))
-            } else {
+        HandshakeIntent::Member => match endpoint.admit_member(peer) {
+            MemberAdmission::Member(inbound) => {
+                Admission::Admit(endpoint.track_liveness(peer), inbound)
+            }
+
+            MemberAdmission::Draining(inbound) => {
+                debug!(%peer, "admitting a departed node to drain its connection");
+                Admission::Admit(endpoint.track_liveness(peer), inbound)
+            }
+
+            MemberAdmission::Dead => {
+                warn!(%peer, "refusing connection, dead node incarnation");
+                Admission::Refuse(RefusalReason::Down)
+            }
+
+            MemberAdmission::Unknown => {
                 debug!(%peer, "refusing connection, not (yet) a member");
                 Admission::Refuse(RefusalReason::UnknownMember)
             }
-        }
+        },
 
         HandshakeIntent::Join => {
             if !endpoint.formed() {
@@ -1282,11 +1321,20 @@ fn admit_inbound(
                 return Admission::Refuse(RefusalReason::NoCluster);
             }
 
-            match endpoint
-                .update(|membership, reachability| membership.admit_join(peer, reachability))
-                .result
-            {
-                JoinAdmission::Admitted { superseded } => {
+            let (admission, inbound) = endpoint
+                .update(|membership, reachability| {
+                    let mut departures = endpoint.departures();
+                    let admission = membership.admit_join(peer, reachability);
+                    let inbound = matches!(
+                        admission,
+                        JoinAdmission::Admitted { .. } | JoinAdmission::AlreadyUp
+                    )
+                    .then(|| endpoint.count_inbound(&mut departures, peer));
+                    (admission, inbound)
+                })
+                .result;
+            match (admission, inbound) {
+                (JoinAdmission::Admitted { superseded }, Some(inbound)) => {
                     if let Some((previous, outcome)) = superseded {
                         warn!(%peer, %previous, "node death, address superseded by a joining incarnation");
                         endpoint.death_consequences(previous, outcome);
@@ -1295,28 +1343,34 @@ fn admit_inbound(
                     endpoint.unrefuse(peer.addr());
                     endpoint.receptionist().origin_up(peer);
                     endpoint.push_gossip();
-                    Admission::Admit(endpoint.track_liveness(peer))
+                    Admission::Admit(endpoint.track_liveness(peer), inbound)
                 }
 
-                JoinAdmission::AlreadyUp => Admission::Admit(endpoint.track_liveness(peer)),
+                (JoinAdmission::AlreadyUp, Some(inbound)) => {
+                    Admission::Admit(endpoint.track_liveness(peer), inbound)
+                }
 
-                JoinAdmission::Dead => {
+                (JoinAdmission::Admitted { .. } | JoinAdmission::AlreadyUp, None) => {
+                    unreachable!("an admitted join is counted as an inbound connection")
+                }
+
+                (JoinAdmission::Dead, _) => {
                     warn!(%peer, "refusing join, dead node incarnation");
                     Admission::Refuse(RefusalReason::Down)
                 }
 
-                JoinAdmission::Held { unreachable } => {
+                (JoinAdmission::Held { unreachable }, _) => {
                     info!(%peer, %unreachable, "holding back join, a member is unreachable");
                     Admission::Refuse(RefusalReason::JoinsHeld)
                 }
 
-                JoinAdmission::Stale { outcome } => {
+                (JoinAdmission::Stale { outcome }, _) => {
                     warn!(%peer, "refusing join, stale incarnation for its address");
                     endpoint.death_consequences(peer, outcome);
                     Admission::Refuse(RefusalReason::Down)
                 }
 
-                JoinAdmission::SupersedesThisNode => {
+                (JoinAdmission::SupersedesThisNode, _) => {
                     warn!(%peer, "a younger incarnation joins at this node's address");
                     endpoint.self_down();
                     Admission::Drop
@@ -1771,11 +1825,11 @@ impl Drop for InFlightFrame {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ActorId, Incoming, MailboxCapacity,
+        ActorId, Backoff, Incoming, MailboxCapacity,
         actor_ref::SelfRef,
         cluster::{
             discovery::{KeyKind, WireKey},
-            endpoint::{EndpointConfig, EndpointInner, FormError},
+            endpoint::{EndpointConfig, EndpointInner, FormError, MemberAdmission},
             frame::{
                 Frame, Handshake, HandshakeEnvelope, HandshakeError, HandshakeIntent, HandshakeV1,
                 RefusalReason,
@@ -2848,7 +2902,7 @@ mod tests {
         endpoint.form_cluster().expect("an unformed endpoint forms");
         assert!(matches!(
             admit_inbound(joiner, HandshakeIntent::Join, None, None, endpoint),
-            Admission::Admit(_)
+            Admission::Admit(..)
         ));
     }
 
@@ -2864,7 +2918,7 @@ mod tests {
 
         assert!(matches!(
             admit_inbound(joiner, HandshakeIntent::Join, None, None, endpoint),
-            Admission::Admit(_)
+            Admission::Admit(..)
         ));
 
         endpoint
@@ -2912,7 +2966,7 @@ mod tests {
 
         assert!(matches!(
             admit_inbound(successor, HandshakeIntent::Join, None, None, endpoint),
-            Admission::Admit(_)
+            Admission::Admit(..)
         ));
 
         assert_eq!(
@@ -3586,11 +3640,11 @@ mod tests {
                 None,
                 endpoint
             ),
-            Admission::Admit(_)
+            Admission::Admit(..)
         ));
         assert!(matches!(
             admit_inbound(member, HandshakeIntent::Member, None, None, endpoint),
-            Admission::Admit(_)
+            Admission::Admit(..)
         ));
 
         assert!(matches!(
@@ -4210,6 +4264,20 @@ mod tests {
         async fn admitted_by(endpoint: &'static EndpointInner, port: u16) -> InboundPeer {
             let node = NodeId::new(addr(port));
             endpoint.update(|membership, _| membership.add_up(node));
+            let peer = InboundPeer::handshaking(endpoint, node, HandshakeIntent::Member)
+                .await
+                .expect("a member is admitted");
+            eventually(|| endpoint.inbound_open(node)).await;
+            peer
+        }
+
+        /// The connection of a node the endpoint already knows, once it answered the handshake:
+        /// admitted, or refused with the reason it gives.
+        async fn handshaking(
+            endpoint: &'static EndpointInner,
+            node: NodeId,
+            intent: HandshakeIntent,
+        ) -> Result<InboundPeer, RefusalReason> {
             let (to_acceptor, acceptor_rx) = unbounded_channel();
             let (acceptor_tx, mut from_acceptor) = unbounded_channel();
             let (streams, streams_rx) = unbounded_channel();
@@ -4227,22 +4295,55 @@ mod tests {
 
             to_acceptor
                 .send(
+                    Frame::Handshake(Handshake::new(HandshakeV1 {
+                        node,
+                        intent,
+                        cluster: None,
+                    }))
+                    .encode_into(Vec::new())
+                    .expect("handshake encodes"),
+                )
+                .expect("the acceptor reads");
+            let answer = timeout(Duration::from_secs(5), from_acceptor.recv())
+                .await
+                .expect("the acceptor answers in time")
+                .expect("the acceptor answers");
+            if let Frame::Refused { reason } = Frame::from_bytes(&answer).expect("frame decodes") {
+                return Err(reason);
+            }
+            Ok(InboundPeer {
+                node,
+                to_acceptor,
+                streams,
+                from_acceptor,
+            })
+        }
+
+        /// A member handshake the dialer gives up right after sending it, so the acceptor's
+        /// answer finds the connection gone.
+        fn abort_handshake(endpoint: &'static EndpointInner, node: NodeId) {
+            let (to_acceptor, acceptor_rx) = unbounded_channel();
+            let (acceptor_tx, from_acceptor) = unbounded_channel::<Vec<u8>>();
+            let (_streams, streams_rx) = unbounded_channel();
+            let connection = StreamingConnection {
+                control: Mutex::new(Some((
+                    ChannelSender(acceptor_tx),
+                    ChannelReceiver {
+                        frames: acceptor_rx,
+                        current: Vec::new(),
+                    },
+                ))),
+                data: tokio::sync::Mutex::new(streams_rx),
+            };
+            drop(from_acceptor);
+            to_acceptor
+                .send(
                     Frame::Handshake(Handshake::new(member_handshake(node)))
                         .encode_into(Vec::new())
                         .expect("handshake encodes"),
                 )
                 .expect("the acceptor reads");
-            timeout(Duration::from_secs(5), from_acceptor.recv())
-                .await
-                .expect("the acceptor answers in time")
-                .expect("the acceptor answers");
-            eventually(|| endpoint.inbound_open(node)).await;
-            InboundPeer {
-                node,
-                to_acceptor,
-                streams,
-                from_acceptor,
-            }
+            task::spawn(run_accepted(connection, endpoint));
         }
 
         fn send(&self, frame: &Frame<'_>) {
@@ -4543,19 +4644,207 @@ mod tests {
         );
     }
 
-    /// Without an inbound connection from the leaver, its death runs at once.
+    /// A departure gossiped by another member, of a node without a connection here, waits for
+    /// one: the leaver's handshake is admitted to drain, its last frames are delivered, and the
+    /// death follows its drained connection.
     #[tokio::test]
-    async fn a_departure_without_an_inbound_connection_dies_at_once() {
+    async fn a_gossiped_departure_waits_for_the_leavers_connection() {
         let endpoint = formed(1);
         let leaver = NodeId::new(addr(2));
         endpoint.update(|membership, _| membership.add_up(leaver));
         let mut recipient = Recipient::watching(endpoint, leaver, ActorId::new());
 
         membership::on_gossip(endpoint, &[Member::new(leaver, MemberState::Left)]);
+        assert!(endpoint.departure_deferred(leaver));
+        assert!(endpoint.delivers_from(leaver));
+        assert!(recipient.received().is_empty());
+
+        let mut connection = InboundPeer::handshaking(endpoint, leaver, HandshakeIntent::Member)
+            .await
+            .expect("the leaver is admitted to drain");
+        let stream = connection.open_stream();
+        stream.send(&message(endpoint, recipient.id(), 1));
+        connection.send(&Frame::Drained { data_streams: 1 });
+        recipient.receive(1).await;
+        drop(stream);
+        connection.drain_ack().await;
+        assert!(endpoint.departure_deferred(leaver));
+
+        drop(connection.close());
+        recipient.receive(2).await;
+        assert_eq!(recipient.received(), [Some(1), None]);
+        assert!(!endpoint.departure_deferred(leaver));
+    }
+
+    /// A departed node which never connects dies at the leave timeout, no sooner.
+    #[tokio::test(start_paused = true)]
+    async fn a_departure_without_a_connection_dies_at_the_leave_timeout() {
+        let endpoint = formed(1);
+        let leaver = NodeId::new(addr(2));
+        endpoint.update(|membership, _| membership.add_up(leaver));
+        let mut recipient = Recipient::watching(endpoint, leaver, ActorId::new());
+        membership::on_gossip(endpoint, &[Member::new(leaver, MemberState::Left)]);
+
+        endpoint.end_overdue_departures(tokio::time::Instant::now());
+        assert!(endpoint.departure_deferred(leaver));
+        assert!(recipient.received().is_empty());
+        tokio::time::advance(endpoint.config().leave_timeout).await;
+        endpoint.end_overdue_departures(tokio::time::Instant::now());
 
         assert!(!endpoint.departure_deferred(leaver));
         assert!(!endpoint.delivers_from(leaver));
         assert_eq!(recipient.received(), [None]);
+    }
+
+    /// A downing learned while a departure waits for its connection ends the wait.
+    #[tokio::test]
+    async fn a_downing_while_a_departure_waits_for_its_connection_ends_it() {
+        let endpoint = formed(1);
+        let leaver = NodeId::new(addr(2));
+        endpoint.update(|membership, _| membership.add_up(leaver));
+        let mut recipient = Recipient::watching(endpoint, leaver, ActorId::new());
+        membership::on_gossip(endpoint, &[Member::new(leaver, MemberState::Left)]);
+        assert!(endpoint.departure_deferred(leaver));
+
+        membership::on_gossip(endpoint, &[Member::new(leaver, MemberState::Down)]);
+
+        assert!(!endpoint.departure_deferred(leaver));
+        assert_eq!(recipient.received(), [None]);
+    }
+
+    /// A reconnect during a deferred departure supersedes the reader it replaces without ending
+    /// the deferral: the replacement delivers the last frames and answers the drain, and the
+    /// death runs only once the replacement has ended.
+    #[tokio::test]
+    async fn a_reconnect_during_a_departure_takes_over_its_drain() {
+        let endpoint = formed(1);
+        let first = InboundPeer::admitted_by(endpoint, 2).await;
+        let node = first.node;
+        let mut recipient = Recipient::watching(endpoint, node, ActorId::new());
+        first.send(&departure(node));
+        eventually(|| endpoint.departure_deferred(node)).await;
+
+        let mut second = InboundPeer::handshaking(endpoint, node, HandshakeIntent::Member)
+            .await
+            .expect("the reconnect is admitted to drain");
+        let stream = second.open_stream();
+        stream.send(&message(endpoint, recipient.id(), 1));
+        second.send(&Frame::Drained { data_streams: 1 });
+        recipient.receive(1).await;
+        drop(stream);
+        second.drain_ack().await;
+        assert!(endpoint.departure_deferred(node));
+
+        drop(second.close());
+        recipient.receive(2).await;
+        assert_eq!(recipient.received(), [Some(1), None]);
+        assert!(!endpoint.departure_deferred(node));
+        drop(first);
+    }
+
+    /// A handshake admitted to drain but abandoned before its reader starts has drained
+    /// nothing: the departure keeps waiting, and a later connection still drains it.
+    #[tokio::test]
+    async fn an_abandoned_drain_handshake_leaves_the_departure_waiting() {
+        let endpoint = formed(1);
+        let leaver = NodeId::new(addr(2));
+        endpoint.update(|membership, _| membership.add_up(leaver));
+        let mut recipient = Recipient::watching(endpoint, leaver, ActorId::new());
+        membership::on_gossip(endpoint, &[Member::new(leaver, MemberState::Left)]);
+
+        InboundPeer::abort_handshake(endpoint, leaver);
+        sleep(Duration::from_millis(100)).await;
+        assert!(!endpoint.inbound_open(leaver));
+        assert!(endpoint.departure_deferred(leaver));
+        assert!(recipient.received().is_empty());
+
+        let connection = InboundPeer::handshaking(endpoint, leaver, HandshakeIntent::Member)
+            .await
+            .expect("a later connection is still admitted to drain");
+        drop(connection.close());
+        recipient.receive(1).await;
+        assert_eq!(recipient.received(), [None]);
+    }
+
+    /// A departed incarnation is admitted with a Member handshake only while its departure is
+    /// deferred; a join is refused, and so is a Member handshake once the deferral has ended or
+    /// the incarnation is Down.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_deferred_departure_admits_its_member_handshake() {
+        let endpoint = formed(1);
+        let leaver = NodeId::new(addr(2));
+        let downed = NodeId::new(addr(3));
+        endpoint.update(|membership, _| {
+            membership.add_up(leaver);
+            membership.add_up(downed);
+        });
+        membership::on_gossip(
+            endpoint,
+            &[
+                Member::new(leaver, MemberState::Left),
+                Member::new(downed, MemberState::Down),
+            ],
+        );
+
+        assert_eq!(
+            InboundPeer::handshaking(endpoint, leaver, HandshakeIntent::Join)
+                .await
+                .err(),
+            Some(RefusalReason::Down)
+        );
+        assert_eq!(
+            InboundPeer::handshaking(endpoint, downed, HandshakeIntent::Member)
+                .await
+                .err(),
+            Some(RefusalReason::Down)
+        );
+        assert!(matches!(
+            endpoint.admit_member(leaver),
+            MemberAdmission::Draining(_)
+        ));
+
+        tokio::time::advance(endpoint.config().leave_timeout).await;
+        endpoint.end_overdue_departures(tokio::time::Instant::now());
+        assert_eq!(
+            InboundPeer::handshaking(endpoint, leaver, HandshakeIntent::Member)
+                .await
+                .err(),
+            Some(RefusalReason::Down)
+        );
+    }
+
+    /// A Member admission and a gossiped departure are serialized by the departures lock, so
+    /// either order ends with the connection counted and the death waiting for it: admitted Up
+    /// first, the departure is deferred for the counted connection; departed first, the
+    /// admission is one to drain.
+    #[tokio::test]
+    async fn a_member_admission_and_a_departure_serialize_either_way() {
+        let endpoint = formed(1);
+        let admitted_first = NodeId::new(addr(2));
+        let departed_first = NodeId::new(addr(3));
+        endpoint.update(|membership, _| {
+            membership.add_up(admitted_first);
+            membership.add_up(departed_first);
+        });
+
+        let MemberAdmission::Member(mut slot) = endpoint.admit_member(admitted_first) else {
+            panic!("an Up member is admitted as one");
+        };
+        membership::on_gossip(endpoint, &[Member::new(admitted_first, MemberState::Left)]);
+        assert!(endpoint.departure_deferred(admitted_first));
+        assert!(endpoint.inbound_open(admitted_first));
+        slot.reading();
+        drop(slot);
+        assert!(!endpoint.departure_deferred(admitted_first));
+
+        membership::on_gossip(endpoint, &[Member::new(departed_first, MemberState::Left)]);
+        let MemberAdmission::Draining(mut slot) = endpoint.admit_member(departed_first) else {
+            panic!("a deferred departure is admitted to drain");
+        };
+        assert!(endpoint.departure_deferred(departed_first));
+        slot.reading();
+        drop(slot);
+        assert!(!endpoint.departure_deferred(departed_first));
     }
 
     /// Frames still buffered on a data stream when the departed peer closes its connection are
@@ -4889,5 +5178,77 @@ mod tests {
         assert_eq!(departure.unacknowledged(), [addr(2)]);
         assert!(departure.acknowledged().is_empty());
         assert!(!departure.is_acknowledged());
+    }
+
+    /// A lane waiting out a reconnect backoff when its endpoint begins to leave dials again at
+    /// once, so a backoff longer than the leave timeout cannot leave a healthy member
+    /// unacknowledged.
+    #[tokio::test(start_paused = true)]
+    async fn a_lane_in_backoff_dials_again_when_its_endpoint_leaves() {
+        let mut config = EndpointConfig::new(addr(1));
+        config.reconnect_backoff =
+            Backoff::new(Duration::from_secs(10), Duration::from_secs(10)).expect("ordered bounds");
+        let (endpoint, lane_dials, _join_requests) =
+            EndpointInner::for_tests_with_data_streams(config, 0);
+        endpoint.form_cluster().expect("an unformed endpoint forms");
+        let member = NodeId::new(addr(2));
+        endpoint.update(|membership, _| membership.add_up(member));
+        let (dial_tx, mut dials) = unbounded_channel();
+        task::spawn(dial_loop(
+            Arc::new(ScriptedTransport(dial_tx)),
+            lane_dials,
+            endpoint,
+        ));
+        endpoint
+            .send(
+                member,
+                Frame::Gossip {
+                    members: Vec::new(),
+                    more: false,
+                },
+            )
+            .expect("the lane opens");
+        let failed = dials.recv().await.expect("the lane dials");
+        drop(failed.answer);
+        sleep(Duration::from_millis(1)).await;
+
+        let departure = task::spawn(endpoint.leave());
+        let dial = timeout(endpoint.config().leave_timeout, dials.recv())
+            .await
+            .expect("the lane dials again within the leave timeout")
+            .expect("the lane dials");
+        let (connected, mut acceptor) = Acceptor::connected();
+        acceptor.cluster = endpoint.committed_cluster().expect("a formed cluster");
+        assert!(
+            dial.answer.send(connected).is_ok(),
+            "the lane awaits the dial"
+        );
+        acceptor.joiner_handshake().await;
+        acceptor.send(&Frame::Handshake(Handshake::new(HandshakeV1 {
+            node: member,
+            intent: HandshakeIntent::Member,
+            cluster: Some(acceptor.cluster),
+        })));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let bytes = acceptor.joiner_bytes().await;
+                if matches!(
+                    Frame::from_bytes(&bytes).expect("frame decodes"),
+                    Frame::Drained { .. }
+                ) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the drain marker arrives in time");
+        acceptor.send(&Frame::DrainAck);
+
+        let departure = timeout(endpoint.config().leave_timeout, departure)
+            .await
+            .expect("the departure ends in time")
+            .expect("the departure does not panic")
+            .expect("a departure");
+        assert_eq!(departure.acknowledged(), [addr(2)]);
     }
 }

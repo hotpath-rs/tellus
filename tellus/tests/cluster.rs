@@ -109,6 +109,8 @@ const MTLS_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const CONVERGENCE_POLL: Duration = Duration::from_millis(200);
 const LEAVE_DEADLINE: Duration = Duration::from_secs(2);
 const DEPARTURE_PINGS: u32 = 1_000;
+const QUICK_LEAVE_ROUNDS: usize = 5;
+const QUICK_LEAVE_CLUSTER: usize = 3;
 const MAJORITY_AFTER: Duration = Duration::from_secs(1);
 const JOIN_HOLD_GRACE: Duration = Duration::from_secs(2);
 const PROBE_INTERVAL: Duration = Duration::from_millis(500);
@@ -181,6 +183,7 @@ fn main() -> anyhow::Result<()> {
         Ok(role) if role == Role::Mutual.as_str() => mutual_node(),
         Ok(role) if role == Role::SelfDown.as_str() => self_down_node(),
         Ok(role) if role == Role::Leave.as_str() => leave_node(),
+        Ok(role) if role == Role::QuickLeave.as_str() => quick_leave_node(),
         Ok(role) if role == Role::Zombie.as_str() => zombie_node(),
         Ok(role) if role == Role::Majority.as_str() => majority_node(),
         Ok(role) if role == Role::ClusterId.as_str() => cluster_id_node(),
@@ -231,6 +234,7 @@ enum Role {
     Mutual,
     SelfDown,
     Leave,
+    QuickLeave,
     Zombie,
     Majority,
     ClusterId,
@@ -249,6 +253,7 @@ impl Role {
             Role::Mutual => "mutual",
             Role::SelfDown => "self-down",
             Role::Leave => "leave",
+            Role::QuickLeave => "quick-leave",
             Role::Zombie => "zombie",
             Role::Majority => "majority",
             Role::ClusterId => "cluster-id",
@@ -412,6 +417,30 @@ impl DowningProvider for SelfDownWithPeers {
 /// terminated, instead of exiting silently and leaving the cluster to detect the silence. It
 /// checks its own departure report: the seed it joined through acknowledged the drain, and a
 /// second leave returns the same report.
+/// Joins, and leaves as soon as it sees the whole cluster Up, while its lanes to the other
+/// members may still be connecting: every member must acknowledge the departure all the same.
+fn quick_leave_node() -> anyhow::Result<()> {
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        start_endpoint().await?;
+        let mut state_rx = cluster::cluster_state()?;
+        timeout(
+            TIMEOUT,
+            state_rx.wait_for(|state| state.up().count() == QUICK_LEAVE_CLUSTER),
+        )
+        .await
+        .context("the whole cluster Up within the timeout")??;
+
+        let departure = timeout(TIMEOUT, cluster::leave())
+            .await
+            .context("leaving the cluster")??;
+        if !departure.is_acknowledged() {
+            bail!("the departure was not acknowledged by every member: {departure:?}");
+        }
+        Ok(())
+    })
+}
+
 fn leave_node() -> anyhow::Result<()> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
@@ -1218,6 +1247,7 @@ fn client() -> anyhow::Result<()> {
     retried("down scenario", || down_scenario(&runtime)).context("down scenario")?;
     zombie_scenario(&runtime).context("zombie scenario")?;
     held_join_scenario(&runtime).context("held join scenario")?;
+    quick_leave_scenario(&runtime).context("quick leave scenario")?;
     retried("keep majority scenario", keep_majority_scenario).context("keep majority scenario")?;
     leave_scenario(&runtime).context("leave scenario")?;
     self_down_scenario().context("self down scenario")?;
@@ -3307,6 +3337,33 @@ fn majority_pair() -> anyhow::Result<[MajorityNode; 2]> {
     let higher = nodes.pop().context("two nodes")?;
     let lower = nodes.pop().context("two nodes")?;
     Ok([lower, higher])
+}
+
+/// A node leaving right after the cluster converged, while its lane to another member may still
+/// be connecting, is acknowledged by every member: a member which learns the departure by gossip
+/// first waits for the leaver's connection instead of running its death at once.
+fn quick_leave_scenario(runtime: &Runtime) -> anyhow::Result<()> {
+    let mut state_rx = cluster::cluster_state()?;
+    let mut observed = Vec::new();
+    await_state(runtime, &mut state_rx, &mut observed, |state| {
+        state.up().count() == 1
+    })
+    .context("the nodes of earlier scenarios are gone")?;
+
+    for round in 1..=QUICK_LEAVE_ROUNDS {
+        let mut witness = KillOnDrop(spawn_node(Role::Leave)?);
+        let witness_ref = resolve_ref::<Request>(&mut witness)?;
+        let mut leaver = KillOnDrop(spawn_node(Role::QuickLeave)?);
+        expect_exit(&mut leaver, "quick leaver").with_context(|| format!("round {round}"))?;
+
+        witness_ref.tell(Request::Stop);
+        expect_exit(&mut witness, "witness").with_context(|| format!("round {round}"))?;
+        await_state(runtime, &mut state_rx, &mut observed, |state| {
+            state.up().count() == 1
+        })
+        .with_context(|| format!("round {round} ends with the client alone"))?;
+    }
+    Ok(())
 }
 
 /// A node which leaves announces it: every member lists it Left right away, well inside the
