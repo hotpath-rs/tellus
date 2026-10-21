@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.9...tellus-v0.4.0) - 2026-10-21
+
+### Added
+
+- add remoting and cluster support
+
 ### Changed
 
 - add shared, versioned remoting reachability observations
