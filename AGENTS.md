@@ -144,6 +144,93 @@ Releases:
 
 CI enforces that a PR consists of exactly one commit; squash before pushing.
 
+## Conventions
+
+Commits:
+
+- A commit message is a single subject line of at most 72 characters, without a body, following
+  conventional commits (release-plz derives the changelog from it). Commit with `git commit -s`, so
+  it carries a `Signed-off-by` trailer, the one exception to the no-body rule.
+
+Writing style, everywhere (code, comments, docs, commit messages, PR descriptions):
+
+- No em or en dashes (U+2014, U+2013) as punctuation; use commas, colons, semicolons or
+  parentheses instead.
+- US English spelling, in identifiers too: "behavior", "color", "neighbor", "initialize",
+  "center", "analyze". Rename an identifier rather than keep a British spelling.
+- No AI slop: no "delve", "dive into", "it's important to note", "seamlessly" as filler,
+  "game-changer", rule-of-three padding, or bullet lists where prose flows better.
+- No marketing bluster: no superlatives about tellus; show results instead of adjectives.
+- No essayist metaphor nouns: "seam", "streak", "load-bearing", "surface area", "the shape of X",
+  "friction". Say the concrete thing: not "until a streak exceeds `max_restarts`" but "until
+  `max_restarts` consecutive restarts have failed". A literal, domain-established use is fine.
+- One point per sentence. A sentence carrying a condition, a mechanism and a consequence at once
+  is split. Not "For the actor itself the value is a lower bound, since only the actor removes
+  items; and because the run loop drops the terminated signals of unwatched actors, the count can
+  exceed what `receive` will get by that many." but "For the actor itself the value is a lower
+  bound, since only the actor removes items. The run loop drops the terminated signals of unwatched
+  actors, so the count can exceed what `receive` will get by that many." Long sentences chain with
+  "and" and "but"; they do not nest.
+- No aphoristic sentence fragments as punchlines ("Failures are values."). Use a full sentence,
+  often opened by a rhetorical question: "Why bother with an uninhabited type? Because ...".
+
+Comments in code:
+
+- A comment states a constraint the code cannot express: an ordering requirement, a type-system
+  limitation, a non-obvious invariant. It never explains why a change was made, what the next line
+  does or why the code is correct; that is talk for a reviewer and noise once the PR is merged.
+  Good: `// A full quota never drains after termination!`. Bad: `/// Crate-private on purpose: for
+  a remote reference the depth would need a round trip, so other actors ask through the actor's
+  own protocol instead.` A comment running past one line is a sign it explains rather than
+  constrains.
+- Item documentation describes the item, never anything downstream of it. Naming a dependency is
+  fine, naming a dependent is not: no "what the viewer draws" or "what the tests compare". Generic
+  role words ("the caller", "an implementation") are fine. This applies to every `///` and `//!`.
+- Doc comments are for `pub` items. A non-public item gets one only where the surrounding code
+  documents its non-public items too; stay consistent with the file. Integration tests
+  (`tests/`) are exempt: a `///` describing what a test proves is fine.
+
+Rust style:
+
+- Avoid type annotations; use turbofish, or `Target::from` / `Target::try_from` where `into` /
+  `try_into` does not infer.
+- Use simple type names imported via `use`; `anyhow::Result` is the exception and is always
+  written fully qualified.
+- A qualified path is as short as possible but as long as necessary to be obvious: import the
+  module that makes the last segment unambiguous. So `f32::consts::TAU` (with `use std::f32;`),
+  never `std::f32::consts::TAU` nor a bare `consts::TAU`; likewise `mem::swap`.
+- Import with `crate::` paths, never `super::`.
+- Bounds on type parameters and supertraits go in a where clause, never inline.
+- Do not swallow errors, e.g. by turning a `Result` into an `Option` via `ok`; an error which
+  cannot or should not be propagated is logged at error or warn level.
+- No item is `pub` or `pub(crate)` unless it needs that visibility.
+- Dependency features belong in the crate's own `Cargo.toml`, not in the workspace root.
+- A name says what the thing is, not what it is about. A function name names what it returns; a
+  collection name names what it holds, in the plural. `_by_x` is reserved for a collection indexed
+  by `x`; anything else leads with the item, so `cell_grouped_positions`, not
+  `positions_by_cell`.
+- A constructor validates the values it derives as well as the values it takes: anything derived
+  by multiplication, addition or conversion can overflow or lose finiteness from valid inputs.
+- Once related values have an order in a struct, keep that order in every parameter list, tuple,
+  return type and destructuring.
+- No blank line between a block and the closing `Ok(...)` which follows it.
+- While tellus is 0.x, no `#[non_exhaustive]` or other compatibility machinery: a new variant is a
+  breaking change for the next minor release, and exhaustive matches make downstream code decide.
+
+Item order within a file:
+
+- `mod`, `use`, `const`, `static` and `type` come first: `pub mod` before `mod` with a blank line
+  between them, then after a blank line `pub use`, and after another blank line `use`.
+- Then the items by visibility tier: `fn main` (the only exception), pub types and their impls, pub
+  free functions, `pub(crate)` types and their impls, `pub(crate)` free functions, then private
+  types and free functions. `#[cfg(test)] mod tests` stays at the bottom.
+- Each type's impls follow the type immediately; an impl belongs with the concrete type it is
+  `for`.
+- Within a tier, items are ordered top-down by call order: a caller comes before what it calls, in
+  the sequence the in-file caller calls them, and a struct containing another comes before it.
+  Where nothing in the file orchestrates them, keep source order.
+- Functions within an impl follow the same order: by visibility first, then by call order.
+
 ## Workspace layout
 
 - `tellus/`: the actor framework. The bootstrap crates and `tellus-persistence-postgres` are
