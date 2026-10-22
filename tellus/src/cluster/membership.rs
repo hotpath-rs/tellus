@@ -585,9 +585,9 @@ pub(crate) enum JoinAdmission {
     SupersedesThisNode,
 }
 
-/// The merge's consequences run out here, where no membership lock is held. A departure of a
-/// node with an inbound connection here is deferred until that connection has drained, see
-/// [EndpointInner::defer_departure].
+/// The merge's consequences run out here, where no membership lock is held. A departure is
+/// deferred until the node's inbound connections here have drained, including one it is yet to
+/// open to drain, see [EndpointInner::defer_departure].
 pub(crate) fn on_gossip(endpoint: &'static EndpointInner, members: &[Member]) {
     let (merge, deferred) = endpoint
         .update(|membership, reachability| {
@@ -612,12 +612,9 @@ pub(crate) fn on_gossip(endpoint: &'static EndpointInner, members: &[Member]) {
                         .iter()
                         .map(|node| (*node, membership.state(*node))),
                 )
-                .filter(|(node, state)| {
-                    *state == Some(MemberState::Left)
-                        && endpoint.defer_departure(&mut departures, *node)
-                })
-                .map(|(node, _)| node)
-                .collect::<HashSet<_>>();
+                .filter(|(_, state)| *state == Some(MemberState::Left))
+                .map(|(node, _)| (node, endpoint.defer_departure(&mut departures, node)))
+                .collect::<HashMap<_, _>>();
             (merge, deferred)
         })
         .result;
@@ -638,21 +635,23 @@ pub(crate) fn on_gossip(endpoint: &'static EndpointInner, members: &[Member]) {
         endpoint.receptionist().origin_up(node);
     }
     for &(node, outcome) in &merge.downed {
-        if deferred.contains(&node) {
-            info!(peer = %node, "node departed, delivering what its connection still carries");
-            continue;
-        }
+        match deferred.get(&node) {
+            Some(true) => {
+                info!(peer = %node, "node departed, delivering what its connection still carries");
+            }
 
-        match outcome.state {
-            MemberState::Left => info!(peer = %node, "node death, departed via gossip"),
-            MemberState::Up | MemberState::Down => {
-                warn!(peer = %node, "node death, downed via gossip")
+            Some(false) => {
+                info!(peer = %node, "node departed, waiting for its connection to drain");
+            }
+
+            None => {
+                warn!(peer = %node, "node death, downed via gossip");
+                endpoint.death_consequences(node, outcome);
             }
         }
-        endpoint.death_consequences(node, outcome);
     }
     for peer in merge.to_flush {
-        if !deferred.contains(&peer) && !merge.downed.iter().any(|(node, _)| *node == peer) {
+        if !deferred.contains_key(&peer) && !merge.downed.iter().any(|(node, _)| *node == peer) {
             endpoint.flush_fenced(peer);
         }
     }

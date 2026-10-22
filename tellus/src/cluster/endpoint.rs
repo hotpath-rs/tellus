@@ -618,6 +618,7 @@ pub(crate) struct EndpointInner {
     refusals: Mutex<HashMap<SocketAddr, Refusal>>,
     lifecycle: CoordinatedLifecycle,
     leaving: AtomicBool,
+    leave_tx: watch::Sender<bool>,
     departure: OnceLock<watch::Receiver<Option<Departed>>>,
     departures: Mutex<Departures>,
     liveness: Liveness,
@@ -951,6 +952,12 @@ impl EndpointInner {
         &self.leaving
     }
 
+    /// Turns true when this node begins to leave, so a lane waiting out a reconnect backoff dials
+    /// again in time to drain.
+    pub(crate) fn leave_rx(&self) -> watch::Receiver<bool> {
+        self.leave_tx.subscribe()
+    }
+
     /// Exposes a failed departure only after this node is downed and severed.
     pub(crate) async fn leave(&'static self) -> Result<Departure, LeaveError> {
         // Decided under the lifecycle lock, so a down landing concurrently either precedes the
@@ -1252,16 +1259,13 @@ impl EndpointInner {
         lock(&self.departures)
     }
 
-    /// Defers the death of a departed node while an inbound connection from it is open, for at
-    /// most `leave_timeout`; `true` if it is deferred.
+    /// Defers the death of a departed node until every inbound connection from it has drained,
+    /// including one it is yet to open to drain, for at most `leave_timeout`; `true` if one is
+    /// open.
     pub(crate) fn defer_departure(&self, departures: &mut Departures, node: NodeId) -> bool {
-        if !departures.inbound.contains(&node) {
-            return false;
-        }
-
         let deadline = tokio_time::Instant::now() + self.config.leave_timeout;
         departures.deferred.entry(node).or_insert(deadline);
-        true
+        departures.inbound.contains_key(&node)
     }
 
     /// Whether frames from the peer are still delivered: it is Up, or its departure is deferred.
@@ -1271,16 +1275,57 @@ impl EndpointInner {
         !self.membership.is_down(peer) || lock(&self.departures).deferred.contains_key(&peer)
     }
 
-    pub(crate) fn inbound_opened(&self, peer: NodeId) {
-        lock(&self.departures).inbound.insert(peer);
+    /// Decides a Member handshake in one critical section with the departures: a departure merged
+    /// in between could otherwise turn an Up member into a refused one, although its death waits
+    /// for exactly this connection.
+    pub(crate) fn admit_member(&'static self, peer: NodeId) -> MemberAdmission {
+        let mut departures = self.departures();
+        if self.membership.is_up(peer) {
+            return MemberAdmission::Member(self.count_inbound(&mut departures, peer));
+        }
+        if departures.deferred.contains_key(&peer)
+            && self.membership.state(peer) == Some(MemberState::Left)
+        {
+            return MemberAdmission::Draining(self.count_inbound(&mut departures, peer));
+        }
+        if self.membership.is_down(peer) {
+            MemberAdmission::Dead
+        } else {
+            MemberAdmission::Unknown
+        }
     }
 
-    /// Runs the deferred death of a departed peer, once its inbound connection has drained.
-    pub(crate) fn inbound_closed(&self, peer: NodeId) {
+    /// Counts an admitted inbound connection until its [InboundSlot] is dropped.
+    pub(crate) fn count_inbound(
+        &'static self,
+        departures: &mut Departures,
+        peer: NodeId,
+    ) -> InboundSlot {
+        *departures.inbound.entry(peer).or_default() += 1;
+        InboundSlot {
+            endpoint: self,
+            peer,
+            reading: false,
+        }
+    }
+
+    /// Runs the deferred death of a departed peer once its last inbound connection has drained,
+    /// so a reader superseded by a reconnect leaves the deferral to its successor. A connection
+    /// abandoned before its reader started has drained nothing, so the deferral keeps waiting
+    /// for another one, until its deadline.
+    fn inbound_closed(&self, peer: NodeId, read: bool) {
         let deferred = {
             let mut departures = lock(&self.departures);
-            departures.inbound.remove(&peer);
-            departures.deferred.remove(&peer).is_some()
+            let remaining = departures.inbound.get_mut(&peer).map_or(0, |count| {
+                *count -= 1;
+                *count
+            });
+            if remaining == 0 {
+                departures.inbound.remove(&peer);
+                read && departures.deferred.remove(&peer).is_some()
+            } else {
+                false
+            }
         };
         if deferred {
             info!(%peer, "node death, its departure has drained");
@@ -1294,7 +1339,7 @@ impl EndpointInner {
 
     #[cfg(test)]
     pub(crate) fn inbound_open(&self, peer: NodeId) -> bool {
-        lock(&self.departures).inbound.contains(&peer)
+        lock(&self.departures).inbound.contains_key(&peer)
     }
 
     /// Runs the deferred deaths whose connections have not drained within `leave_timeout`.
@@ -1429,6 +1474,7 @@ impl EndpointInner {
             refusals: Mutex::new(HashMap::new()),
             lifecycle: CoordinatedLifecycle::new(),
             leaving: AtomicBool::new(false),
+            leave_tx: watch::channel(false).0,
             departure: OnceLock::new(),
             departures: Mutex::new(Departures::default()),
             liveness: Liveness::new(),
@@ -1519,6 +1565,7 @@ impl EndpointInner {
 
     fn begin_leave(&self) -> Vec<(SocketAddr, oneshot::Receiver<Drain>)> {
         self.leaving.store(true, Ordering::Relaxed);
+        self.leave_tx.send_replace(true);
         self.lanes.drain()
     }
 
@@ -1627,12 +1674,41 @@ pub(crate) struct Updated<R> {
     pub(crate) disconnected: Vec<(Member, Instant)>,
 }
 
-/// The peers with an inbound connection open, and the departed ones among them whose death waits
-/// for that connection to drain, until a deadline.
+/// The admitted inbound connections per peer, and the departed peers whose death waits for theirs
+/// to drain, until a deadline.
 #[derive(Default)]
 pub(crate) struct Departures {
-    inbound: HashSet<NodeId>,
+    inbound: HashMap<NodeId, usize>,
     deferred: HashMap<NodeId, tokio_time::Instant>,
+}
+
+/// An admitted inbound connection, counted in [Departures] from its admission until it is
+/// dropped, whether its reader ends or its setup is abandoned before the reader starts.
+pub(crate) struct InboundSlot {
+    endpoint: &'static EndpointInner,
+    peer: NodeId,
+    reading: bool,
+}
+
+impl InboundSlot {
+    /// Marks the connection's reader as started, from when its end is a drained connection.
+    pub(crate) fn reading(&mut self) {
+        self.reading = true;
+    }
+}
+
+impl Drop for InboundSlot {
+    fn drop(&mut self) {
+        self.endpoint.inbound_closed(self.peer, self.reading);
+    }
+}
+
+/// How a Member handshake is admitted, see [EndpointInner::admit_member].
+pub(crate) enum MemberAdmission {
+    Member(InboundSlot),
+    Draining(InboundSlot),
+    Dead,
+    Unknown,
 }
 
 fn validate(config: &EndpointConfig) -> Result<(), InvalidEndpointConfig> {

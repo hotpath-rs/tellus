@@ -278,7 +278,9 @@ cleanly and every frame they carried was dispatched. This node then counts the p
 acknowledged and closes the connection. An acknowledgement proves that every frame queued for the
 peer reached the framework's delivery path there, a local mailbox or a logged dead letter. It does
 not prove that any actor handled them. The whole exchange is bounded by `leave_timeout`: one
-deadline for every lane, not restarted between the phases. A connection closed before the
+deadline for every lane, not restarted between the phases. A lane waiting out a reconnect backoff
+when the departure begins dials again at once, and a lane keeps dialing until the departure has
+ended, so a peer is reached whatever state its lane was in. A connection closed before the
 `DrainAck`, a read error and a writer which failed or could not finish its stream never count as
 acknowledged; the marker is not even sent after a failed writer. A member which is gone already
 costs that timeout and then learns the departure from another member's gossip, or, with no live
@@ -297,8 +299,10 @@ is, so the process is expected to exit, and only a restart rejoins.
 The departure is part of the gossiped state, so a member recognizes it however it arrives: from
 the leaver itself, or relayed by a third member, which can reach it before the leaver's own
 announcement does. A member learning it treats the incarnation as dead at once: it sends nothing
-more to it, refuses its handshakes and stops counting it as a member. The node death sequence,
-though, waits while this member holds an inbound connection from that incarnation. That
+more to it, refuses its joins and stops counting it as a member. The node death sequence, though,
+waits for every inbound connection from that incarnation, counted from its admission, and for one
+the leaver is yet to open: while the departure is deferred, this member admits the leaver's
+Member handshake to drain, and only that one. That
 connection carries everything the leaver queued for this member, and its streams are not ordered
 against the control stream the departure rides. So every stream of the connection is read to its
 end, and a closed connection ends no reader early: what a stream still buffers is delivered first.
@@ -307,9 +311,11 @@ announces, and so do streams accepted only after it. Once that number has ended,
 answers with a `DrainAck` and keeps the connection open until the leaver closes it. The wait is
 bounded by this member's own `leave_timeout`, counted from when it learned the departure and not
 restarted by the marker; past it, no `DrainAck` is sent. Then the death runs, once, after the
-connection's readers have finished: pending asks fail, the remaining watchers get synthesized
-signals, the leaver's registrations are evicted. Without an inbound
-connection from the leaver, the death runs at once. A downing of the leaver learned meanwhile
+last connection's readers have finished: pending asks fail, the remaining watchers get
+synthesized signals, the leaver's registrations are evicted. A reconnect which supersedes a
+reader takes over its drain, since the superseded reader is no longer the last connection. One
+abandoned before its reader started has drained nothing and does not end the wait. Without any
+connection from the leaver, the death waits for one, up to the same deadline. A downing of the leaver learned meanwhile
 ends the wait immediately, and the member is Down from then on. Completing the drain changes only
 local state; the replicated state stays Left. A drain frame outside a deferred departure breaks
 the protocol and closes its connection, like an undecodable frame: a `Drained` marker from a
@@ -520,8 +526,9 @@ the far side as unknown targets, at-most-once either way.
     It guarantees exactly one thing, made true by construction rather than observation:
     **after the signal, no message from that actor is ever delivered through this endpoint
     again.** The node death sequence finds the incarnation Left or Down and stops all delivery
-    from it before the signals are flushed, and a handshake from a Left or Down incarnation is
-    refused.
+    from it before the signals are flushed, and from then on a handshake from a Left or Down
+    incarnation is refused: a Left one is admitted only while its death is deferred, before any
+    signal is flushed.
     Distinguishing a crashed node from an unreachable one is impossible in an asynchronous
     network; this weakening is fundamental, not an implementation gap.
 
@@ -999,9 +1006,10 @@ swap is added.
   gossiped as Left, however it reaches a member. A peer answers the leaver's `Drained` marker with a
   `DrainAck` once every data stream has ended and its frames were dispatched to a mailbox or a
   logged dead letter. No actor need have handled them. A peer which does not acknowledge within the
-  leaver's `leave_timeout` appears in the `Departure` as unacknowledged or timed out. So does a peer
-  which learns the departure without an inbound connection from the leaver, e.g. while that
-  connection is still being dialed right after the cluster converged: it runs the death at once. A peer the
+  leaver's `leave_timeout` appears in the `Departure` as unacknowledged or timed out. A peer which
+  learns the departure before the leaver's connection exists, e.g. right after the cluster
+  converged, waits for that connection up to its own `leave_timeout`, so its death and its
+  watchers' synthesized signals come that much later when the leaver never reaches it. A peer the
   leaver cannot reach still learns the departure through relayed gossip or, with no live path at
   all, through failure detection and downing. A peer defers the leaver's death for at most its own
   `leave_timeout`. Whatever is still unread then, e.g. behind a stalled stream, is lost, and its
