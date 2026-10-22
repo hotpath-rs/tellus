@@ -63,10 +63,10 @@ Tasks are defined in the [justfile](justfile):
   `persistence.rs`, `host_persistence.rs` and `persistence_tests.rs`, which also needs
   `persistence-tests`). Integration tests live in `tellus/tests/`: `ask.rs`, `persistence.rs`,
   `fairness.rs`, `how_to_unit_test.rs`, `how_to_unit_test_event_sourced.rs`,
-  `persistence_tests.rs`, `pipe_to_self.rs`, `supervision.rs`, `termination.rs`, `test_context.rs`,
-  `test_context_persistence.rs`, `watch.rs`, plus `cluster.rs`, which needs `--features
-  cluster-dev`, has no test harness and runs its scenarios from `main`, spawning itself as further
-  nodes. `test_context.rs` and `how_to_unit_test.rs` need `--features test-util`, and
+  `persistence_tests.rs`, `pipe_to_self.rs`, `queued.rs`, `supervision.rs`, `termination.rs`,
+  `test_context.rs`, `test_context_persistence.rs`, `watch.rs`, plus `cluster.rs`, which needs
+  `--features cluster-dev`, has no test harness and runs its scenarios from `main`, spawning itself
+  as further nodes. `test_context.rs` and `how_to_unit_test.rs` need `--features test-util`, and
   `test_context_persistence.rs` and `how_to_unit_test_event_sourced.rs` also `persistence`, or they
   silently run none.
 - Examples: `cargo run --quiet -p tellus --example getting_started_01_hello` and so on; the getting

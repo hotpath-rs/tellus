@@ -45,6 +45,10 @@ impl<T> CountedSender<T> {
     pub(crate) fn try_send_uncounted(&self, item: T) -> Result<(), Disconnected> {
         self.tx.send(item).map_err(|_| Disconnected)
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.tx.len()
+    }
 }
 
 // A derived `Clone` would needlessly require `T: Clone`.
