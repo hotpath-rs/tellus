@@ -119,6 +119,14 @@ Benchmarks:
   a bencher recipe plus a benchmark and a store-result step in `bench.yml`; `dev/bench/index.html`
   on `gh-pages` is a customized copy of the action's default page (headline plus one sub-heading
   per section) which the action leaves alone once it exists.
+- `Stack sweep` (`.github/workflows/stack-sweep.yml`, manual, `gh workflow run stack-sweep.yml -f
+  base=<parent> -f candidate=<commit>`): the messaging bench at 16 worker-stack positions on
+  `ubuntu-latest` and `ubuntu-24.04-arm`, 4 jobs each with an A/A control, for a candidate that is
+  one commit on top of its base. Where a worker stack lies moves single rows by tens of percent
+  either way (`docs/investigations/actor-id-alignment/`), so a regression from one stack position,
+  the PR comparison included, needs this before it counts. `.github/stack-sweep/report.py <run ID>`
+  applies the fixed limits (below +3% passes, above +5% fails, borderline rows get a second run
+  whose ID is passed as well); `test_report.py` next to it pins them.
 - `just bench-cluster`: the remoting throughput and latency numbers (pipelined and serial tells and
   asks, a bulk transfer), run by the `cluster.rs` test in its bench role across spawned processes;
   not part of CI, for comparing before and after a change to `tellus/src/cluster`.
