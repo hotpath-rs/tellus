@@ -13,6 +13,7 @@
 [![docs][docs-badge]][docs-url]
 [![benchmarks][benchmarks-badge]][benchmarks-url]
 [![comparison][comparison-badge]][comparison-url]
+[![hotpath-cloud][hotpath-cloud-badge]][hotpath-cloud-url]
 
 [crates-badge]: https://img.shields.io/crates/v/tellus
 [crates-url]: https://crates.io/crates/tellus
@@ -26,6 +27,8 @@
 [benchmarks-url]: https://tellus.rs/tellus/dev/bench/
 [comparison-badge]: https://img.shields.io/badge/comparison-dashboard-informational
 [comparison-url]: https://tellus.rs/tellus/comparison/
+[hotpath-cloud-badge]: https://img.shields.io/endpoint?url=https://hotpath.rs/badge-cloud.json
+[hotpath-cloud-url]: https://hotpath.rs/app/repos/tellus-rs/tellus
 
 An actor framework for Rust, built on [Tokio](https://tokio.rs): typed messages, supervision
 trees, death watch with an ordering guarantee, optional event-sourced persistence and optional
