@@ -121,8 +121,9 @@ bench-report:
     done < <(find target/criterion -path '*/change/estimates.json' | sort)
     printf '\n'
     if [[ $regressed -ne 0 ]]; then
-        printf '_Regression: 95%% confident a benchmark is at least %s%% slower._\n' "$threshold_pct"
+        printf '_Regression: 95%% confident a benchmark is at least %s%% slower._\n\n' "$threshold_pct"
     fi
+    printf '_One stack position, with the head always running second: a hint, not a verdict. A change to code the benches run gets the stack sweep, label `sweep` or `sweep-persistence` ([protocol](https://github.com/tellus-rs/tellus/blob/main/.github/stack-sweep/README.md))._\n'
 
 profile:
     cargo run --release -p tellus --example profile --features hotpath

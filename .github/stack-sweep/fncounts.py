@@ -1,21 +1,43 @@
-"""Per-function instruction counts of two binaries: fncounts.py A B (env OBJDUMP for a cross objdump)."""
-import re, subprocess, sys
-def counts(path):
-    out = subprocess.run([__import__("os").environ.get("OBJDUMP","objdump"), "-d", "-C", "--no-show-raw-insn", path], capture_output=True, text=True).stdout
-    fns, name = {}, None
-    for line in out.splitlines():
-        m = re.match(r"^[0-9a-f]+ <(.*)>:$", line)
-        if m:
-            name = re.sub(r"\.llvm\.\d+", "", m.group(1)); fns[name] = 0; continue
-        if name and re.match(r"^\s+[0-9a-f]+:\s", line):
-            fns[name] += 1
-    return fns
-a, b = counts(sys.argv[1]), counts(sys.argv[2])
-sel = lambda n: ("tellus" in n or "messaging" in n or "flume" in n) and "drop_glue" not in n
-only_a = sorted(n for n in a if n not in b and sel(n)); only_b = sorted(n for n in b if n not in a and sel(n))
-diff = sorted((n, a[n], b[n]) for n in a if n in b and a[n] != b[n] and sel(n))
-same = sum(1 for n in a if n in b and a[n] == b[n] and sel(n))
-print(f"functions only in A: {len(only_a)}; only in B: {len(only_b)}; differing: {len(diff)}; identical: {same}")
-for n in only_a: print("A only", a[n], n[:150])
-for n in only_b: print("B only", b[n], n[:150])
-for n, x, y in diff: print(f"differ {x} -> {y}", n[:150])
+"""Per-function instruction counts of two binaries, names normalized by disasm.py:
+fncounts.py BASE CANDIDATE [--select REGEX] [--rename REGEX=REPLACEMENT]... Name collisions are
+listed and left out of the counts.
+"""
+
+import argparse
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from disasm import load, renames_from
+
+parser = argparse.ArgumentParser()
+parser.add_argument("base")
+parser.add_argument("candidate")
+parser.add_argument("--select", default=r"tellus|flume|messaging|persistence")
+parser.add_argument("--rename", action="append", help="REGEX=REPLACEMENT, applied to the candidate")
+args = parser.parse_args()
+
+base, candidate = load(args.base, []), load(args.candidate, renames_from(args.rename))
+select = re.compile(args.select)
+selected = lambda name: select.search(name) and "drop_glue" not in name
+a = {name: len(body) for name, body in base.functions.items() if selected(name)}
+b = {name: len(body) for name, body in candidate.functions.items() if selected(name)}
+collisions = sorted(set(base.collisions(a)) | set(candidate.collisions(b)))
+only_a = sorted(set(a) - set(b))
+only_b = sorted(set(b) - set(a))
+common = sorted(set(a) & set(b) - set(collisions))
+differ = [(name, a[name], b[name]) for name in common if a[name] != b[name]]
+print(
+    f"functions only in base: {len(only_a)}; only in candidate: {len(only_b)}; "
+    f"differing: {len(differ)}; same count: {len(common) - len(differ)}; colliding: {len(collisions)}"
+)
+for name in only_a:
+    print("base only", a[name], name[:170])
+for name in only_b:
+    print("cand only", b[name], name[:170])
+for name, x, y in differ:
+    print(f"differ {x} -> {y}", name[:170])
+for name in collisions:
+    print(f"collision {name[:170]}: base {len(base.raw_names.get(name, ()))}, "
+          f"candidate {len(candidate.raw_names.get(name, ()))} functions")

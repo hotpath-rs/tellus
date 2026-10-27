@@ -65,13 +65,13 @@ def main(run_ids):
                 path = os.path.join(target, artifact)
                 metadata = json.load(open(os.path.join(path, "metadata.json")))
                 lines = [json.loads(line) for line in open(os.path.join(path, "results.jsonl"))]
-                key = (metadata.get("candidate_name", "C"), metadata["runner"])
+                key = (metadata.get("candidate_name", "C"), metadata.get("bench", "messaging"), metadata["runner"])
                 jobs.setdefault(key, []).append((run_index, metadata, lines))
 
-    for (candidate, runner), runner_jobs in sorted(jobs.items()):
+    for (candidate, bench, runner), runner_jobs in sorted(jobs.items()):
         first_jobs = [(metadata, lines) for run_index, metadata, lines in runner_jobs if run_index == 0]
         extra_jobs = [(metadata, lines) for run_index, metadata, lines in runner_jobs if run_index == 1]
-        print(f"## {candidate} on {runner}, {len(first_jobs)} jobs plus {len(extra_jobs)} for borderline rows")
+        print(f"## {candidate}, {bench}, on {runner}, {len(first_jobs)} jobs plus {len(extra_jobs)} for borderline rows")
         for _, metadata, lines in runner_jobs:
             print(f"- run {metadata['run_id']} job {metadata['job']}: {metadata['cpu']}, {len(lines)} lines")
         print()
