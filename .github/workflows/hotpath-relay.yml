@@ -7,7 +7,7 @@ on:
 
 jobs:
   relay-profile:
-    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@2ee4ef4ba17bdf79a73d4c07d4cd8d0bbda66df5 # v0.28.7
+    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@9b238fa84222efde573f29eb4bae76dcb5f700c0 # v0.28.6
     permissions:
       actions: read
       id-token: write
@@ -18,7 +18,7 @@ jobs:
       report_file: report.json
 
   relay-profile-persistence:
-    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@2ee4ef4ba17bdf79a73d4c07d4cd8d0bbda66df5 # v0.28.7
+    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@9b238fa84222efde573f29eb4bae76dcb5f700c0 # v0.28.6
     permissions:
       actions: read
       id-token: write

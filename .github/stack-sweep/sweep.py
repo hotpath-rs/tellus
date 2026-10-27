@@ -1,7 +1,8 @@
-"""Run the messaging bench across worker-stack shifts, or summarize one job's results.
+"""Run a bench across worker-stack shifts, or summarize one job's results.
 
-run:     sweep.py run --preload SO --workdir DIR --out FILE B=BIN C=BIN A=BIN
+run:     sweep.py run [--bench messaging|persistence] --preload SO --workdir DIR --out FILE B=BIN C=BIN A=BIN
 summary: sweep.py summary FILE
+lines:   sweep.py lines [--bench messaging|persistence], the number of result lines of a full run
 """
 
 import argparse
@@ -13,45 +14,62 @@ import subprocess
 import sys
 import time
 
-ROWS = [
-    "flood/unbounded",
-    "flood/bounded",
-    "ping_pong/pairs/1",
-    "ping_pong/pairs/4",
-    "fan_out/workers/4",
-    "fan_out/workers/16",
-    "queued/never/4",
-    "queued/never/16",
-    "queued/every/4",
-    "queued/every/16",
-]
+BENCH_ROWS = {
+    "messaging": [
+        "flood/unbounded",
+        "flood/bounded",
+        "ping_pong/pairs/1",
+        "ping_pong/pairs/4",
+        "fan_out/workers/4",
+        "fan_out/workers/16",
+        "queued/never/4",
+        "queued/never/16",
+        "queued/every/4",
+        "queued/every/16",
+    ],
+    "persistence": [
+        "persist/no_snapshots",
+        "persist/snapshots",
+        "recover/replay",
+        "recover/snapshot",
+    ],
+}
 SHIFTS = list(range(0, 4096, 256))
 REPETITIONS = 3
 ORDER = ["B", "C", "A"]
+WORKER_THREADS = 4
 
 
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     run_parser = commands.add_parser("run")
+    run_parser.add_argument("--bench", choices=sorted(BENCH_ROWS), default="messaging")
     run_parser.add_argument("--preload", required=True)
     run_parser.add_argument("--workdir", required=True)
     run_parser.add_argument("--out", required=True)
-    run_parser.add_argument("--rows", nargs="*", default=ROWS)
+    run_parser.add_argument("--rows", nargs="*")
     run_parser.add_argument("--shifts", nargs="*", type=int, default=SHIFTS)
     run_parser.add_argument("--repetitions", type=int, default=REPETITIONS)
+    run_parser.add_argument("--workers", type=int, default=WORKER_THREADS)
     run_parser.add_argument("binaries", nargs=3)
     summary_parser = commands.add_parser("summary")
     summary_parser.add_argument("results")
+    lines_parser = commands.add_parser("lines")
+    lines_parser.add_argument("--bench", choices=sorted(BENCH_ROWS), default="messaging")
     args = parser.parse_args()
 
     if args.command == "run":
         binaries = dict(binary.split("=", 1) for binary in args.binaries)
         if sorted(binaries) != sorted(ORDER):
             sys.exit(f"expected binaries {ORDER}, got {sorted(binaries)}")
+        if args.rows is None:
+            args.rows = BENCH_ROWS[args.bench]
         run(args, {name: os.path.abspath(path) for name, path in binaries.items()})
-    else:
+    elif args.command == "summary":
         summary(args.results)
+    else:
+        print(len(BENCH_ROWS[args.bench]) * len(SHIFTS) * REPETITIONS * len(ORDER))
 
 
 def run(args, binaries):
@@ -63,7 +81,7 @@ def run(args, binaries):
             for shift in args.shifts:
                 for row in args.rows:
                     for name in order:
-                        median = measure(binaries[name], name, row, shift, preload, workdir)
+                        median = measure(binaries[name], name, row, shift, preload, workdir, args.workers)
                         line = {
                             "binary": name,
                             "repetition": repetition,
@@ -76,7 +94,7 @@ def run(args, binaries):
                         out.flush()
 
 
-def measure(binary, name, row, shift, preload, workdir):
+def measure(binary, name, row, shift, preload, workdir, workers):
     home = os.path.join(workdir, name)
     row_dir = os.path.join(home, row)
     shutil.rmtree(row_dir, ignore_errors=True)
@@ -97,8 +115,12 @@ def measure(binary, name, row, shift, preload, workdir):
     context = f"{name} {row} shift {shift}"
     if process.returncode != 0:
         sys.exit(f"{context}: exit code {process.returncode}\n{process.stderr}")
-    if f"stack_shift={shift}" not in process.stderr.splitlines():
+    stderr = process.stderr.splitlines()
+    if f"stack_shift={shift}" not in stderr:
         sys.exit(f"{context}: stack_shift={shift} missing from stderr\n{process.stderr}")
+    threads = [int(line.split("=", 1)[1]) for line in stderr if line.startswith("stack_shift_threads=")]
+    if len(threads) != 1 or threads[0] < workers:
+        sys.exit(f"{context}: expected stack_shift_threads of at least {workers}\n{process.stderr}")
 
     estimates = os.path.join(row_dir, "new", "estimates.json")
     benchmark = os.path.join(row_dir, "new", "benchmark.json")
@@ -115,7 +137,7 @@ def measure(binary, name, row, shift, preload, workdir):
 
 def summary(results):
     lines = [json.loads(line) for line in open(results)]
-    rows = [row for row in ROWS if any(line["row"] == row for line in lines)]
+    rows = list(dict.fromkeys(line["row"] for line in lines))
     shifts = sorted({line["shift"] for line in lines})
 
     print("| Row | Candidate | A/A |")

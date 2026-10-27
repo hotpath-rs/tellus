@@ -5,9 +5,13 @@
 #include <stdlib.h>
 #include <alloca.h>
 struct launch { void *(*f)(void *); void *arg; size_t shift; };
+static unsigned long launched;
 __attribute__((constructor)) static void announce(void) {
     const char *value = getenv("STACK_SHIFT");
     fprintf(stderr, "stack_shift=%lu\n", value ? strtoul(value, 0, 10) : 0);
+}
+__attribute__((destructor)) static void count(void) {
+    fprintf(stderr, "stack_shift_threads=%lu\n", __atomic_load_n(&launched, __ATOMIC_RELAXED));
 }
 __attribute__((noinline)) static void *entry(void *p) {
     struct launch launch = *(struct launch *)p;
@@ -26,5 +30,6 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*f)(voi
     *p = (struct launch){ f, arg, value ? strtoul(value, 0, 10) : 0 };
     int result = real_create(thread, attr, entry, p);
     if (result) free(p);
+    else __atomic_fetch_add(&launched, 1, __ATOMIC_RELAXED);
     return result;
 }
