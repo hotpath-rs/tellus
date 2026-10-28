@@ -94,11 +94,13 @@ where
     /// This is how an actor uses async code without awaiting: it keeps handling messages while
     /// the future runs, and the output arrives via [Actor::receive] like any other message.
     ///
-    /// The message takes the same path as an [ActorRef::tell] to this actor: it counts against a
-    /// bounded mailbox capacity and is dropped and logged as a dead letter if this actor has
-    /// terminated or its mailbox is full. The future is not cancelled when this actor stops or
-    /// restarts; after a restart, its message is received by the new state. A panic in the future
-    /// or in the conversion is logged at error level, and no message is delivered.
+    /// The message is enqueued even if this actor's bounded mailbox is full. This actor started the
+    /// future itself, so such messages are bounded by the futures it has in flight. The message
+    /// still counts against the capacity, so ordinary senders are refused until the mailbox has
+    /// drained back under it. It is dropped and logged as a dead letter if this actor has
+    /// terminated. The future is not canceled when this actor stops or restarts; after a restart,
+    /// its message is received by the new state. A panic in the future or in the conversion is
+    /// logged at error level, and no message is delivered.
     ///
     /// # Panics
     /// Panics if called outside of a Tokio runtime.
@@ -115,8 +117,9 @@ where
             let piped = async move { into_message(future.await) };
             if let Some(message) =
                 catch_panic_and_log_async(actor_id, "piped future failed", piped).await
+                && let Err(error) = actor_ref.try_tell_forced(message)
             {
-                actor_ref.tell(message);
+                actor_ref.dead_letter(&error);
             }
         });
     }

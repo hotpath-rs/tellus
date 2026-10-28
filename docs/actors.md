@@ -118,7 +118,7 @@ resolves once the root, and therefore the entire tree, has terminated.
 
 An unbounded mailbox never drops messages, but an actor which cannot keep up grows it without
 limit. A bounded mailbox applies no backpressure: sends to a full mailbox fail as dead letters,
-while terminated signals are still delivered.
+while terminated signals and the outputs of piped futures are still delivered.
 
 Prefer a bounded mailbox: its capacity caps the memory, and every dropped message shows up as a
 dead letter at warn level instead of as a growing process. Size it by the number of messages the
@@ -197,12 +197,18 @@ delivers its output to the actor itself, converted into its message type by the 
 just like `reply_to`. The actor keeps handling messages meanwhile. Blocking work fits the same
 mould: the `JoinHandle` of `tokio::task::spawn_blocking` is itself a future to pipe.
 
-The output takes the same path as a tell to this actor: it counts against a bounded capacity and
-becomes a dead letter if the actor has terminated or its mailbox is full. The task is not tied to
-the actor's lifecycle: stopping does not cancel it, since cancelling at an `await` could cut an
-operation in half, and after a restart its output is received by the new state, like any message
-queued in the retained mailbox. An actor which must tell outputs of an earlier incarnation apart
-gives each request an identifier and keeps the open ones in its state.
+The output is enqueued like a tell to this actor, except that a full bounded mailbox does not refuse
+it. Why not drop it like a tell? Because the actor waits for it. An actor which tracks the piped
+work in its state, e.g. a journal with one write in flight, would wait forever for an output dropped
+as a dead letter. The delivery forces a reservation past the capacity, as a host does for the
+messages it buffered (see hosts below). The count hence stays balanced: ordinary senders are refused
+until the actor has drained back under its capacity. Only the actor itself pipes futures, so the
+outputs past the capacity are bounded by the futures it has in flight. The output becomes a dead
+letter only if the actor has terminated. The task is not tied to the actor's lifecycle: stopping
+does not cancel it, since canceling at an `await` could cut an operation in half, and after a
+restart its output is received by the new state, like any message queued in the retained mailbox. An
+actor which must tell outputs of an earlier incarnation apart gives each request an identifier and
+keeps the open ones in its state.
 
 Polls of the future and the conversion run under `catch_unwind`, the shared
 `catch_panic_and_log_async`: a panic is logged at error level with the actor ID, and no message is
@@ -621,7 +627,8 @@ has to wait for the actor, since `tell` returns before the message is handled.
   signal's guarantee, covering the actor's state, its actor value and its descendants, is
   unaffected.
 - `receive` is synchronous and cannot await; long running or blocking work runs in a future
-  piped to the actor via `pipe_to_self`, whose output arrives as a message, at most once.
+  piped to the actor via `pipe_to_self`, whose output arrives as a message, at most once, and is
+  not refused by a full bounded mailbox.
 - Request-response is at-most-once too: `ask` resolves exactly once, with the reply or an error,
   at the latest when its timeout elapses, and never redelivers; a `reply_to` reply is an ordinary
   send, dropped as a dead letter if the asker is gone or its bounded mailbox is full.

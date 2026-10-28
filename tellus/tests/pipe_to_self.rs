@@ -1,6 +1,6 @@
 use std::{
     future::Future,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     sync::{
         Arc,
@@ -9,8 +9,8 @@ use std::{
     time::Duration,
 };
 use tellus::{
-    Actor, ActorConfig, ActorContext, ActorSystem, Backoff, Control, Incoming, RestartPolicy,
-    SupervisionStrategy, Untimed,
+    Actor, ActorConfig, ActorContext, ActorSystem, Backoff, Control, Incoming, MailboxCapacity,
+    RestartPolicy, SupervisionStrategy, Untimed,
 };
 use thiserror::Error;
 use tokio::{
@@ -132,6 +132,32 @@ async fn stopped_actor_does_not_wait_for_future() {
         .expect("piped future did not finish")
         .expect("piped future dropped the sender");
     assert_eq!(events.recv().await, None);
+}
+
+/// A full bounded mailbox still receives the output: it is enqueued past the capacity. The future
+/// fills the single slot itself right before it completes. The test runs on one thread, so the
+/// actor cannot free the slot before the output is sent.
+#[tokio::test]
+async fn full_bounded_mailbox_still_receives_output() {
+    let config =
+        ActorConfig::default().with_mailbox_capacity(MailboxCapacity::Bounded(NonZeroUsize::MIN));
+    let (system, mut events) = probe_system(config);
+
+    let probe = system.root().clone();
+    system.root().tell(Message::Pipe(Box::pin(async move {
+        probe.tell(Message::Ping);
+        9
+    })));
+
+    assert_eq!(next_event(&mut events).await, Event::Ping);
+    assert_eq!(
+        next_event(&mut events).await,
+        Event::Piped {
+            generation: 1,
+            value: 9
+        }
+    );
+    stop(system).await;
 }
 
 struct Probe {
