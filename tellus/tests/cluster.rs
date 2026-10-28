@@ -3434,6 +3434,7 @@ fn identity_binding_scenario() -> anyhow::Result<()> {
     let mut ca_params = rcgen::CertificateParams::new(Vec::new()).context("ca parameters")?;
     ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let ca_cert = ca_params.self_signed(&ca_key).context("ca certificate")?;
+    let ca = rcgen::Issuer::from_params(&ca_params, &ca_key);
     let ca_path = dir.join("ca.der");
     fs::write(&ca_path, ca_cert.der()).context("writing the ca certificate")?;
 
@@ -3445,9 +3446,7 @@ fn identity_binding_scenario() -> anyhow::Result<()> {
                 let uri = uri.try_into().context("node URI")?;
                 params.subject_alt_names.push(rcgen::SanType::URI(uri));
             }
-            let cert = params
-                .signed_by(&key, &ca_cert, &ca_key)
-                .context("node certificate")?;
+            let cert = params.signed_by(&key, &ca).context("node certificate")?;
             let cert_path = dir.join(format!("{name}.der"));
             let key_path = dir.join(format!("{name}.key"));
             fs::write(&cert_path, cert.der()).context("writing the node certificate")?;

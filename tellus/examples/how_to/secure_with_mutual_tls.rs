@@ -8,7 +8,7 @@
 //! how_to_secure_with_mutual_tls`.
 
 use anyhow::Context;
-use rcgen::{BasicConstraints, Certificate, CertificateParams, IsCa, KeyPair, SanType};
+use rcgen::{BasicConstraints, Certificate, CertificateParams, IsCa, Issuer, KeyPair, SanType};
 use rustls::{
     RootCertStore,
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
@@ -116,7 +116,7 @@ struct NodeConfig {
 // ANCHOR: certificate-authority
 struct CertificateAuthority {
     cert: Certificate,
-    key: KeyPair,
+    issuer: Issuer<'static, KeyPair>,
 }
 
 impl CertificateAuthority {
@@ -127,7 +127,8 @@ impl CertificateAuthority {
         let cert = params
             .self_signed(&key)
             .context("signing the CA certificate")?;
-        Ok(Self { cert, key })
+        let issuer = Issuer::new(params, key);
+        Ok(Self { cert, issuer })
     }
 
     fn issue(&self, addr: SocketAddr) -> anyhow::Result<(Certificate, KeyPair)> {
@@ -139,7 +140,7 @@ impl CertificateAuthority {
             uri.try_into().context("the URI SAN is not ASCII")?,
         ));
         let cert = params
-            .signed_by(&key, &self.cert, &self.key)
+            .signed_by(&key, &self.issuer)
             .context("signing a node certificate")?;
         Ok((cert, key))
     }
