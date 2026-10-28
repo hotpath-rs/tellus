@@ -101,6 +101,10 @@ name = "getting_started_07_device_manager"
 path = "examples/tutorials/getting_started/07_device_manager.rs"
 
 [[example]]
+name = "getting_started_08_stale_readings"
+path = "examples/tutorials/getting_started/08_stale_readings.rs"
+
+[[example]]
 name              = "event_sourced_01_device"
 path              = "examples/tutorials/event_sourced/01_device.rs"
 required-features = [ "persistence-in-memory" ]
@@ -123,6 +127,10 @@ path = "examples/how_to/call_async_code.rs"
 name              = "how_to_configure_supervision"
 path              = "examples/how_to/configure_supervision.rs"
 required-features = [ "serde" ]
+
+[[example]]
+name = "how_to_batch_writes"
+path = "examples/how_to/batch_writes.rs"
 
 [[example]]
 name = "explanation_state_machine"

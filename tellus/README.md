@@ -343,9 +343,9 @@ returned by `handle` against the entity's state, without a store. See the Testin
 The examples in [`examples/tutorials/getting_started`](examples/tutorials/getting_started) are the
 code of the [getting started tutorial](https://tellus.rs/docs/tutorials/getting-started/), one
 program per step: from a single actor via child actors, watch and a per-request query to
-supervision and a device manager on top. Each step builds on the previous one. All examples print
-their results to stdout; those which set up logging log to stderr, with the log level configured
-via `RUST_LOG`.
+supervision, a device manager on top and readings which go stale through timers. Each step builds
+on the previous one. All examples print their results to stdout; those which set up logging log to
+stderr, with the log level configured via `RUST_LOG`.
 
 ```shell
 cargo run --quiet -p tellus --example getting_started_01_hello
@@ -362,9 +362,10 @@ cargo run --quiet -p tellus --features cluster-dev --example clustered_01_two_no
 ```
 
 The examples in [`examples/how_to`](examples/how_to) belong to the
-[how-to guides](https://tellus.rs/docs/how-to/), among them shutting a node down gracefully
-(`how_to_shut_down_gracefully`), observing a cluster (`how_to_observe_a_cluster`) and securing it
-with mutual TLS (`how_to_secure_with_mutual_tls`, which needs `--features cluster,serde`). The
+[how-to guides](https://tellus.rs/docs/how-to/), among them batching writes by mailbox depth
+(`how_to_batch_writes`), shutting a node down gracefully (`how_to_shut_down_gracefully`), observing
+a cluster (`how_to_observe_a_cluster`) and securing it with mutual TLS
+(`how_to_secure_with_mutual_tls`, which needs `--features cluster,serde`). The
 guides for running on Kubernetes and for serving the cluster state over HTTP use examples in
 [`tellus-bootstrap-k8s`](../tellus-bootstrap-k8s/examples) and
 [`tellus-cluster-inspect`](../tellus-cluster-inspect/examples).
