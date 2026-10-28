@@ -12,7 +12,7 @@ use sqlx::PgPool;
 use std::{convert::Infallible, env, time::Duration};
 use tellus::{
     ActorContext, ActorSystem, Effect, EventSourced, Incoming, Persistence, PersistenceId, ReplyTo,
-    SchemaVersion, Versioned,
+    SchemaVersion, Untimed, Versioned,
 };
 use tellus_persistence_postgres::PostgresStore;
 
@@ -52,6 +52,7 @@ struct Device;
 
 impl EventSourced for Device {
     type Command = Command;
+    type Timers = Untimed;
     type Event = Recorded;
     type State = Readings;
     type Snapshot = Readings;

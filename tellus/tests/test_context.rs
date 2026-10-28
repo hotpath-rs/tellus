@@ -5,7 +5,10 @@ use std::{
     sync::{Mutex, mpsc as std_mpsc},
     time::Duration,
 };
-use tellus::{Actor, ActorContext, Control, Incoming, testing::TestContext};
+use tellus::{
+    Actor, ActorContext, Control, Incoming, Untimed,
+    testing::{PendingTimer, TestContext},
+};
 use tokio::{sync::mpsc, task::block_in_place, time::timeout};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -75,6 +78,119 @@ fn queued_counts_the_incoming_not_yet_taken() {
 
     test_context.take_incoming();
     assert_eq!(test_context.context().queued(), 0);
+}
+
+/// Timers an actor starts are listed earliest first, with the delay as started, since the paused
+/// clock does not advance.
+#[tokio::test(start_paused = true)]
+async fn started_timers_are_listed() {
+    let test_context = TestContext::<u32>::timed();
+    test_context
+        .context()
+        .start_timer("late", 1, Duration::from_secs(2));
+    test_context
+        .context()
+        .start_timer("early", 2, Duration::from_secs(1));
+
+    assert_eq!(
+        test_context.timers(),
+        [
+            PendingTimer {
+                key: "early",
+                remaining: Duration::from_secs(1)
+            },
+            PendingTimer {
+                key: "late",
+                remaining: Duration::from_secs(2)
+            },
+        ]
+    );
+}
+
+/// Firing a timer delivers its message once, as the run loop would.
+#[test]
+fn firing_a_timer_delivers_its_message_once() {
+    let mut test_context = TestContext::<u32>::timed();
+    test_context
+        .context()
+        .start_timer("t", 7, Duration::from_secs(1));
+
+    assert!(test_context.fire_timer("t"));
+    assert!(!test_context.fire_timer("t"));
+    assert_eq!(test_context.take_incoming(), [Incoming::Message(7)]);
+    assert!(test_context.timers().is_empty());
+}
+
+/// A timer canceled after it fired is dropped on the way to the actor, so cancel is reliable even
+/// for an item already queued.
+#[test]
+fn canceling_a_fired_timer_drops_its_message() {
+    let mut test_context = TestContext::<u32>::timed();
+    test_context
+        .context()
+        .start_timer("t", 7, Duration::from_secs(1));
+
+    assert!(test_context.fire_timer("t"));
+    test_context.context().cancel_timer("t");
+
+    assert!(test_context.take_incoming().is_empty());
+}
+
+/// Restarting a key after its timer fired delivers only the new message.
+#[test]
+fn restarting_a_fired_timer_delivers_only_the_new_message() {
+    let mut test_context = TestContext::<u32>::timed();
+    test_context
+        .context()
+        .start_timer("t", 1, Duration::from_secs(1));
+    assert!(test_context.fire_timer("t"));
+
+    test_context
+        .context()
+        .start_timer("t", 2, Duration::from_secs(1));
+    assert!(test_context.fire_timer("t"));
+
+    assert_eq!(test_context.take_incoming(), [Incoming::Message(2)]);
+}
+
+/// A fired timer keeps its place: a message told before it is taken before it.
+#[test]
+fn a_fired_timer_is_ordered_behind_earlier_messages() {
+    let mut test_context = TestContext::<u32>::timed();
+    test_context
+        .context()
+        .start_timer("t", 7, Duration::from_secs(1));
+
+    test_context.context().self_ref().tell(1);
+    assert!(test_context.fire_timer("t"));
+    test_context.context().self_ref().tell(2);
+
+    assert_eq!(
+        test_context.take_incoming(),
+        [
+            Incoming::Message(1),
+            Incoming::Message(7),
+            Incoming::Message(2)
+        ]
+    );
+}
+
+/// A timed context needs no turbofish when the message type is inferred from its use.
+#[test]
+fn a_timed_context_infers_its_message_type() {
+    let mut test_context = TestContext::timed();
+    test_context
+        .context()
+        .start_timer("t", 7_u32, Duration::from_secs(1));
+
+    assert!(test_context.fire_timer("t"));
+    assert_eq!(test_context.take_incoming(), [Incoming::Message(7)]);
+}
+
+#[test]
+fn firing_an_unknown_timer_is_false() {
+    let mut test_context = TestContext::<u32>::timed();
+    assert!(!test_context.fire_timer("never started"));
 }
 
 #[tokio::test]
@@ -211,6 +327,7 @@ struct Summer;
 
 impl Actor for Summer {
     type Message = u32;
+    type Timers = Untimed;
     type State = u32;
     type Error = Infallible;
 
@@ -241,6 +358,7 @@ enum Chat {
 
 impl Actor for Chatter {
     type Message = Chat;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -268,6 +386,7 @@ struct BlockingChild {
 
 impl Actor for BlockingChild {
     type Message = ();
+    type Timers = Untimed;
     type State = Barrier;
     type Error = Infallible;
 
@@ -312,6 +431,7 @@ struct Reporter {
 
 impl Actor for Reporter {
     type Message = u32;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -355,6 +475,7 @@ impl Drop for NotifyOnDrop {
 
 impl Actor for Notifier {
     type Message = ();
+    type Timers = Untimed;
     type State = NotifyOnDrop;
     type Error = Infallible;
 

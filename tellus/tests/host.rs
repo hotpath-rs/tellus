@@ -9,7 +9,7 @@ use std::{
 };
 use tellus::{
     Actor, ActorConfig, ActorContext, ActorId, ActorRef, ActorSystem, Control, Host, HostConfig,
-    HostEnvelope, Incoming, InvalidHostConfig, MailboxCapacity, ReplyTo,
+    HostEnvelope, Incoming, InvalidHostConfig, MailboxCapacity, ReplyTo, Untimed,
 };
 use tokio::{
     sync::{Mutex as AsyncMutex, Notify, mpsc},
@@ -387,6 +387,7 @@ struct Root {
 
 impl Actor for Root {
     type Message = RootMessage;
+    type Timers = Untimed;
     type State = ActorRef<HostEnvelope<u8, Message>>;
     type Error = Infallible;
 
@@ -439,6 +440,7 @@ struct Entity {
 
 impl Actor for Entity {
     type Message = Message;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -467,14 +469,15 @@ impl Actor for Entity {
             Incoming::Message(Message::Ping(reply_to)) => reply_to.reply(actor_id),
 
             Incoming::Message(Message::Stop) => {
+                // Must be created before the report, which a release may follow at once!
+                let released = self.entities.hold.clone().map(Notify::notified_owned);
                 let _ = self.entities.passivating.send(actor_id);
 
-                match &self.entities.hold {
-                    Some(hold) => {
-                        let hold = hold.clone();
+                match released {
+                    Some(released) => {
                         let entity = context.self_ref().clone();
                         tokio::spawn(async move {
-                            hold.notified().await;
+                            released.await;
                             entity.tell(Message::Die);
                         });
                     }

@@ -77,7 +77,7 @@ A minimal actor system with a single actor which handles one message and stops:
 ```rust
 use anyhow::Context;
 use std::convert::Infallible;
-use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming};
+use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming, Untimed};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -95,6 +95,7 @@ struct Greeter;
 
 impl Actor for Greeter {
     type Message = Greet;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -152,7 +153,11 @@ that cannot fail). Inside `receive`, use `?` to escalate a failure to supervisio
 `receive` is synchronous and runs on a Tokio worker: an actor cannot be stopped while `receive` is
 running, so a `receive` which never completes keeps all its ancestors from terminating. For long
 running or blocking work, use `ActorContext::pipe_to_self`: it runs a future on its own task and
-delivers the output to the actor as an ordinary message.
+delivers the output to the actor as an ordinary message. For a deadline, a retry or an idle timeout,
+declare `type Timers = Timed;` and use `ActorContext::start_timer`: it delivers a message to the
+actor itself once a delay has elapsed. A timer replaced under its key or canceled with
+`ActorContext::cancel_timer` is never received. An actor with `type Timers = Untimed;` has no timers
+and pays nothing for them.
 
 ### The actor tree and termination
 

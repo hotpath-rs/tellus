@@ -64,11 +64,12 @@ Tasks are defined in the [justfile](justfile):
   `persistence-tests`). Integration tests live in `tellus/tests/`: `ask.rs`, `persistence.rs`,
   `fairness.rs`, `how_to_unit_test.rs`, `how_to_unit_test_event_sourced.rs`,
   `persistence_tests.rs`, `pipe_to_self.rs`, `queued.rs`, `supervision.rs`, `termination.rs`,
-  `test_context.rs`, `test_context_persistence.rs`, `watch.rs`, plus `cluster.rs`, which needs
-  `--features cluster-dev`, has no test harness and runs its scenarios from `main`, spawning itself
-  as further nodes. `test_context.rs` and `how_to_unit_test.rs` need `--features test-util`, and
-  `test_context_persistence.rs` and `how_to_unit_test_event_sourced.rs` also `persistence`, or they
-  silently run none.
+  `test_context.rs`, `test_context_persistence.rs`, `timers.rs`, `watch.rs`, plus `cluster.rs`,
+  which needs `--features cluster-dev`, has no test harness and runs its scenarios from `main`,
+  spawning itself as further nodes. `test_context.rs` and `how_to_unit_test.rs` need `--features
+  test-util`, and `test_context_persistence.rs` and `how_to_unit_test_event_sourced.rs` also
+  `persistence`, or they silently run none. `timers.rs` holds one scheduler-sensitive test,
+  `stale_timers_do_not_delay_a_stop`, which is `#[ignore]`d and runs only with `-- --ignored`.
 - Examples: `cargo run --quiet -p tellus --example getting_started_01_hello` and so on; the getting
   started tutorial lives in `tellus/examples/tutorials/getting_started/`, one example per step.
   The remoting examples need `--features cluster-dev`, e.g. `cargo run --quiet -p tellus --features
@@ -323,7 +324,7 @@ Item order within a file:
   recovery state re-arms it, an older one is ignored) rather than inventing transitions. Depends
   on tellus, the inspect crate and the demo's library for the wire types; a default workspace
   member gated by `just all`, run with `just run-cluster-demo-tui`.
-- `tellus/src/testing.rs` (feature `test-util`): `TestContext`, a real `ActorContext` plus the mailbox behind it, for calling `Actor` and `EventSourced` methods directly in unit tests; its `terminate` is the production `actor_context::terminate` run with `()` as the actor value, so the descendant barrier is not duplicated. With `persistence` it also holds `settle`, the store-free part of `spawn.rs`'s settlement (`apply_events`, then the `then` continuations), and `Effect::events` / `Effect::stop_requested` are gated on `test-util`. `docs/actors.md` and `docs/persistence.md` show the two doctests of this module as their Testing examples; keep them identical.
+- `tellus/src/testing.rs` (feature `test-util`): `TestContext`, a real `ActorContext` plus the mailbox behind it, for calling `Actor` and `EventSourced` methods directly in unit tests; its `terminate` is the production `actor_context::terminate` run with `()` as the actor value, so the descendant barrier is not duplicated. `TestContext::new` is the context of an `Untimed` actor and `TestContext::timed` that of a `Timed` one; only the latter has `timers`, listing the pending ones as `PendingTimer` values, and `fire_timer`, which fires one as the run loop would, whatever its delay, since no timer fires by itself. With `persistence` it also holds `settle`, the store-free part of `spawn.rs`'s settlement (`apply_events`, then the `then` continuations), and `Effect::events` / `Effect::stop_requested` are gated on `test-util`. `docs/actors.md` and `docs/persistence.md` show the two doctests of this module as their Testing examples; keep them identical.
 - `tellus-comparison/`: competitive benchmarks with strict fairness rules (unbounded mailboxes
   everywhere, fire-and-forget sends only, identical timing boundaries); read its README before
   changing any benchmark.
@@ -350,7 +351,16 @@ cross-file invariants:
   tree; termination is bottom-up, with each actor's Tokio watch channel closing (all child
   receivers dropped) as the barrier proving every descendant has terminated. The state is dropped
   before the children are stopped; only the actor value waits for the barrier, and the watchers
-  are signaled last: a terminated signal must prove the actor's destructors have run.
+  are signaled last: a terminated signal must prove the actor's destructors have run. The run loop
+  also owns the timers: it polls the one sleep of the table in `timers.rs`, which `start_timer`
+  creates and moves only for an earlier deadline. A due timer never enters the mailbox: the table
+  records it with a position, the items received so far plus the mailbox's length when it fired,
+  and the run loop takes it, one per iteration and stale ones dropped, once it has received that
+  many items. Which loop an actor runs is its `Timers` type's choice (`Actor::Timers` and
+  `EventSourced::Timers`, `Untimed` or `Timed`), made by static dispatch through the sealed
+  `TimerMode` before `task::spawn`; the untimed loop neither polls a sleep nor counts items, and
+  neither loop checks the mode. `start_timer` and `cancel_timer` exist only on
+  `ActorContext<M, Timed>`.
 - `mailbox.rs` is where messaging and death watch meet: one FIFO flume channel per actor, always
   unbounded underneath, with a bounded capacity enforced by a reservation counter (`quota.rs`) in
   front. Terminated signals bypass the capacity check but ride the same FIFO channel as ordinary
@@ -363,7 +373,8 @@ cross-file invariants:
   is no longer watched before `receive` ever sees it.
 - Supervision (`actor_config.rs`): errors and panics (both `init` and `receive` run under
   `catch_unwind`) are handled identically; `Restart` rebuilds only the state via `init` on the
-  same actor value, retains the mailbox, and backs off exponentially between consecutive restarts.
+  same actor value, retains the mailbox, cancels the timers, and backs off exponentially between
+  consecutive restarts.
 - `actor_system.rs`: `spawn_root` spawns the root through the same `spawn` path as any child and
   registers a watcher directly in the root's watcher registry; the watcher's handler resolves
   `terminated()` and owns the sender keeping the root running.

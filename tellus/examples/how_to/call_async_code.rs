@@ -4,7 +4,7 @@
 
 use anyhow::Context;
 use std::{convert::Infallible, time::Duration};
-use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming, ReplyTo};
+use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming, ReplyTo, Untimed};
 use thiserror::Error;
 use tokio::{
     task::{self, JoinError},
@@ -53,6 +53,7 @@ struct Directory;
 
 impl Actor for Directory {
     type Message = Message;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 

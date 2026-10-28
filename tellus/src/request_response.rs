@@ -1,6 +1,6 @@
 #[cfg(feature = "cluster")]
 use crate::cluster;
-use crate::{ActorContext, ActorRef, actor_ref::Sink, mailbox::SendError};
+use crate::{ActorContext, ActorRef, TimerMode, actor_ref::Sink, mailbox::SendError};
 use derive_more::Debug;
 use std::{any::type_name, cell::Cell, time::Duration};
 use thiserror::Error;
@@ -79,7 +79,10 @@ impl<M> ActorRef<M> {
     }
 }
 
-impl<M> ActorContext<M> {
+impl<M, T> ActorContext<M, T>
+where
+    T: TimerMode,
+{
     /// Create a [ReplyTo] which delivers the reply to this actor as an ordinary message,
     /// converted by the given function, typically an enum variant constructor. This is the actor
     /// side of request-response: no future is created or awaited, the reply arrives via

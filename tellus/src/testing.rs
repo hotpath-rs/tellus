@@ -8,22 +8,24 @@
 //! [Actor::receive]: crate::Actor::receive
 
 use crate::{
-    ActorContext, ActorId, Incoming, MailboxCapacity, actor_context, actor_ref::SelfRef,
-    mailbox::Mailbox,
+    ActorContext, ActorId, Incoming, MailboxCapacity, Timed, TimerMode, Untimed, actor_context,
+    actor_ref::SelfRef, mailbox::Mailbox,
 };
 #[cfg(feature = "persistence")]
 use crate::{
     EventSourced,
     persistence::{effect::Effect, spawn},
 };
-use std::iter;
+use std::{iter, time::Duration};
+use tokio::time::Instant;
 
 /// An [ActorContext] together with the mailbox behind it, for calling an actor's methods directly.
 ///
 /// Everything the actor sends to itself arrives in the mailbox: [ActorRef::tell] on
-/// [ActorContext::self_ref], the replies of a [ReplyTo] from [ActorContext::reply_to], and the
+/// [ActorContext::self_ref], the replies of a [ReplyTo] from [ActorContext::reply_to], the
 /// [Incoming::Terminated] signal of [ActorContext::watch] on an actor which has already
-/// terminated. [TestContext::take_incoming] returns it in FIFO order.
+/// terminated. [TestContext::take_incoming] returns it in FIFO order, with the message of a timer
+/// fired by [TestContext::fire_timer] behind the items which were queued when it fired.
 ///
 /// Calling an actor directly bypasses the run loop. Notably, a terminated signal passed to
 /// [Actor::receive] is not dropped when its sender is no longer watched, and nothing restarts the
@@ -31,16 +33,22 @@ use std::iter;
 /// runtime; the child is asked to stop when the [TestContext] is dropped, and
 /// [TestContext::terminate] waits for it.
 ///
+/// `T` is the actor's [TimerMode]; [TestContext::new] creates an [Untimed] context and
+/// [TestContext::timed] a [Timed] one. No timer fires when its delay elapses; see
+/// [TestContext::fire_timer]. [TestContext::take_incoming] drops canceled or replaced timers for
+/// its whole batch at once, not item by item between calls to [Actor::receive].
+///
 /// # Testing
 ///
 /// ```
 /// use std::convert::Infallible;
-/// use tellus::{Actor, ActorContext, Control, Incoming, testing::TestContext};
+/// use tellus::{Actor, ActorContext, Control, Incoming, Untimed, testing::TestContext};
 ///
 /// struct Countdown;
 ///
 /// impl Actor for Countdown {
 ///     type Message = u32;
+///     type Timers = Untimed;
 ///     type State = u32;
 ///     type Error = Infallible;
 ///
@@ -78,34 +86,21 @@ use std::iter;
 /// [Actor::receive]: crate::Actor::receive
 /// [ActorRef::tell]: crate::ActorRef::tell
 /// [ReplyTo]: crate::ReplyTo
-pub struct TestContext<M> {
-    context: ActorContext<M>,
+pub struct TestContext<M, T = Untimed>
+where
+    T: TimerMode,
+{
+    context: ActorContext<M, T>,
     mailbox: Mailbox<M>,
 }
 
-impl<M> TestContext<M> {
-    /// Create a context with a fresh [ActorId] and an unbounded mailbox. Needs no Tokio runtime.
-    pub fn new() -> Self
-    where
-        M: Send + 'static,
-    {
-        let (self_ref, mailbox) = SelfRef::new(ActorId::new(), MailboxCapacity::Unbounded);
-
-        Self {
-            context: ActorContext::new(self_ref),
-            mailbox,
-        }
-    }
-
+impl<M, T> TestContext<M, T>
+where
+    T: TimerMode,
+{
     /// The context to pass to the actor's methods.
-    pub fn context(&self) -> &ActorContext<M> {
+    pub fn context(&self) -> &ActorContext<M, T> {
         &self.context
-    }
-
-    /// Everything enqueued in the mailbox since the last call, in the order it arrived. Does not
-    /// wait for more.
-    pub fn take_incoming(&mut self) -> Vec<Incoming<M>> {
-        iter::from_fn(|| self.mailbox.try_recv()).collect()
     }
 
     /// Terminate this context's actor as the run loop would: stop its children and wait until all
@@ -116,15 +111,119 @@ impl<M> TestContext<M> {
     pub async fn terminate(self) {
         actor_context::terminate((), self.context, self.mailbox).await;
     }
+
+    fn with_fresh_id() -> Self
+    where
+        M: Send + 'static,
+    {
+        let (self_ref, mailbox) = SelfRef::new(ActorId::new(), MailboxCapacity::Unbounded);
+
+        Self {
+            context: ActorContext::new(self_ref),
+            mailbox,
+        }
+    }
 }
 
-impl<M> Default for TestContext<M>
+impl<M> TestContext<M, Untimed> {
+    /// Create an [Untimed] context with a fresh [ActorId] and an unbounded mailbox. Needs no Tokio
+    /// runtime.
+    pub fn new() -> Self
+    where
+        M: Send + 'static,
+    {
+        Self::with_fresh_id()
+    }
+
+    /// Create a [Timed] context with a fresh [ActorId] and an unbounded mailbox. Needs no Tokio
+    /// runtime; without one, no timer is armed, and [TestContext::fire_timer] still fires it.
+    pub fn timed() -> TestContext<M, Timed>
+    where
+        M: Send + 'static,
+    {
+        TestContext::with_fresh_id()
+    }
+
+    /// Everything enqueued in the mailbox since the last call, in the order it arrived. Does not
+    /// wait for more.
+    pub fn take_incoming(&mut self) -> Vec<Incoming<M>> {
+        iter::from_fn(|| self.mailbox.try_recv()).collect()
+    }
+}
+
+impl<M> TestContext<M, Timed> {
+    /// Everything enqueued in the mailbox since the last call, in the order it arrived. Does not
+    /// wait for more. Like the run loop, it drops a fired timer which the actor has canceled or
+    /// replaced since. Unlike the run loop, it does so for the whole batch at once rather than item
+    /// by item between calls to [Actor::receive]. A cancel made while handling an earlier item
+    /// hence cannot drop a timer behind it. To test that, pass the earlier item to
+    /// [Actor::receive] directly and take the incoming afterwards.
+    ///
+    /// [Actor::receive]: crate::Actor::receive
+    pub fn take_incoming(&mut self) -> Vec<Incoming<M>> {
+        iter::from_fn(|| {
+            loop {
+                if self.context.timer_deliverable() {
+                    if let Some(message) = self.context.take_due_timer() {
+                        return Some(Incoming::Message(message));
+                    }
+                } else {
+                    let incoming = self.mailbox.try_recv()?;
+                    self.context.count_received();
+                    return Some(incoming);
+                }
+            }
+        })
+        .collect()
+    }
+
+    /// The timers the actor has started which have not fired yet, earliest deadline first, those
+    /// with equal deadlines in the order they were started. However much time passes, a timer stays
+    /// listed until [TestContext::fire_timer] fires it or the actor cancels or replaces it.
+    ///
+    /// The time remaining is measured on Tokio's clock. A test which asserts it pauses that clock,
+    /// e.g. with `#[tokio::test(start_paused = true)]`.
+    pub fn timers(&self) -> Vec<PendingTimer> {
+        let now = Instant::now();
+
+        self.context
+            .pending_timers()
+            .into_iter()
+            .map(|(key, deadline)| PendingTimer {
+                key,
+                remaining: deadline.saturating_duration_since(now),
+            })
+            .collect()
+    }
+
+    /// Fire the timer started under this key as the run loop does once its delay has elapsed,
+    /// whatever time is left. Its message is placed behind the items already in the mailbox, and
+    /// [TestContext::take_incoming] returns it unless the actor cancels or replaces the timer
+    /// first. Returns whether there was a timer to fire, that is `false` for an unknown key and for
+    /// a timer which has fired already.
+    pub fn fire_timer(&mut self, key: &'static str) -> bool {
+        self.context.fire_timer(key)
+    }
+}
+
+impl<M> Default for TestContext<M, Untimed>
 where
     M: Send + 'static,
 {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A timer which an actor has started and which has not fired yet, as listed by
+/// [TestContext::timers].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTimer {
+    /// The key the timer was started under.
+    pub key: &'static str,
+
+    /// The time left until the timer is due, zero once its deadline has passed.
+    pub remaining: Duration,
 }
 
 /// The outcome of [settle].
@@ -153,7 +252,7 @@ pub struct Settlement<S> {
 /// use std::convert::Infallible;
 /// use tellus::{
 ///     ActorContext, Effect, EventSourced, Incoming, Nothing, PersistenceId, ReplyTo,
-///     SchemaVersion, Versioned,
+///     SchemaVersion, Untimed, Versioned,
 ///     testing::{TestContext, settle},
 /// };
 ///
@@ -174,6 +273,7 @@ pub struct Settlement<S> {
 ///
 /// impl EventSourced for Counter {
 ///     type Command = Command;
+///     type Timers = Untimed;
 ///     type Event = Increased;
 ///     type State = u64;
 ///     type Snapshot = Nothing;

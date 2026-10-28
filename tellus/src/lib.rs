@@ -25,7 +25,11 @@
 //! [Incoming::Terminated] signal, and [ActorContext::unwatch], which reverts that. The signal is
 //! ordered behind all messages the terminated actor has delivered to the watcher. Receiving it
 //! hence proves that the watcher has seen every message from that actor it will ever see: each
-//! arrived before the signal or was dropped as a dead letter.
+//! arrived before the signal or was dropped as a dead letter. An actor declaring `type Timers =
+//! Timed` can message itself after a delay via [ActorContext::start_timer], behind the messages
+//! queued for it; a timer replaced under its key or canceled via [ActorContext::cancel_timer] is
+//! never received. With `type Timers =` [Untimed], the mode of the plain [ActorContext], an actor
+//! has no timers and pays nothing for them.
 //!
 //! A [Host] hosts entities: actors identified by a key, spawned on the first [HostEnvelope] for
 //! that key and, if configured, passivated once nothing has messaged them for a while, with
@@ -82,6 +86,7 @@ mod persistence;
 mod quota;
 mod request_response;
 mod sync;
+mod timers;
 mod watch;
 
 pub use crate::{
@@ -94,6 +99,7 @@ pub use crate::{
     backoff::{Backoff, InvalidBackoff},
     host::{Host, HostConfig, HostEnvelope, InvalidHostConfig},
     request_response::{AskError, ReplyTo},
+    timers::{Timed, TimerMode, Untimed},
 };
 
 #[cfg(feature = "persistence")]

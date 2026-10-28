@@ -5,7 +5,7 @@
 
 use anyhow::Context;
 use std::convert::Infallible;
-use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming};
+use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming, Untimed};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,6 +23,7 @@ struct Greeter;
 
 impl Actor for Greeter {
     type Message = Greet;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 

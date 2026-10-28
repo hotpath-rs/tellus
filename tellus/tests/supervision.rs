@@ -8,7 +8,7 @@ use std::{
 };
 use tellus::{
     Actor, ActorConfig, ActorContext, ActorRef, ActorSystem, Backoff, Control, Incoming, Nothing,
-    RestartPolicy, SupervisionStrategy,
+    RestartPolicy, SupervisionStrategy, Untimed,
 };
 use thiserror::Error;
 use tokio::{
@@ -385,6 +385,7 @@ struct Counter {
 
 impl Actor for Counter {
     type Message = CounterMessage;
+    type Timers = Untimed;
     type State = u32;
     type Error = Boom;
 
@@ -426,6 +427,7 @@ struct FailOnReinitialization {
 
 impl Actor for FailOnReinitialization {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 
@@ -455,6 +457,7 @@ struct FailInit {
 
 impl Actor for FailInit {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 
@@ -482,6 +485,7 @@ struct BackoffParent {
 
 impl Actor for BackoffParent {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 
@@ -518,6 +522,7 @@ struct StoppingRoot {
 
 impl Actor for StoppingRoot {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 
@@ -557,6 +562,7 @@ struct RestartingMiddle {
 
 impl Actor for RestartingMiddle {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 
@@ -598,6 +604,7 @@ struct BlockedInInit {
 
 impl Actor for BlockedInInit {
     type Message = Nothing;
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 
@@ -624,6 +631,7 @@ struct Parent {
 
 impl Actor for Parent {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 
@@ -653,6 +661,7 @@ struct Child {
 
 impl Actor for Child {
     type Message = Nothing;
+    type Timers = Untimed;
     type State = Alive;
     type Error = Boom;
 
@@ -696,6 +705,7 @@ struct WatchingParent {
 
 impl Actor for WatchingParent {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 
@@ -729,6 +739,7 @@ struct Idle;
 
 impl Actor for Idle {
     type Message = Nothing;
+    type Timers = Untimed;
     type State = ();
     type Error = Boom;
 

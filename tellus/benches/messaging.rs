@@ -7,6 +7,9 @@
 //!   workers per worker thread.
 //! - `queued`: concurrent sender tasks, one and four per worker thread, flood a single counting
 //!   actor which reads its own mailbox depth on every message or never.
+//! - `timers`: concurrent sender tasks, one and four per worker thread, flood a single counting
+//!   actor which restarts an idle timer on every message, starts one in `init` and leaves it
+//!   pending, or starts none.
 //!
 //! All benchmarks run on a Tokio runtime with a fixed worker thread count, which also sizes the
 //! workloads, so measurements do not depend on the host's core count.
@@ -20,6 +23,7 @@ use std::{
 };
 use tellus::{
     Actor, ActorConfig, ActorContext, ActorRef, ActorSystem, Control, Incoming, MailboxCapacity,
+    Timed, Untimed,
 };
 use tokio::runtime::{Builder, Runtime};
 
@@ -30,6 +34,8 @@ const FLOOD_CAPACITY: NonZeroUsize =
 const PING_PONG_ROUNDS: usize = 1_000;
 const FAN_OUT_MESSAGES: usize = 100_000;
 const QUEUED_MESSAGES: usize = 100_000;
+const TIMERS_MESSAGES: usize = 100_000;
+const IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 fn flood(c: &mut Criterion) {
     let rt = runtime();
@@ -161,6 +167,52 @@ fn queued(c: &mut Criterion) {
     group.finish();
 }
 
+fn timers(c: &mut Criterion) {
+    let rt = runtime();
+
+    let mut group = c.benchmark_group("timers");
+
+    for senders in [WORKER_THREADS, 4 * WORKER_THREADS] {
+        let share = TIMERS_MESSAGES / senders;
+        group.throughput(Throughput::Elements((share * senders) as u64));
+
+        let idle_timers = [
+            ("none", IdleTimer::None),
+            ("armed_idle", IdleTimer::ArmedIdle),
+            ("restart_each", IdleTimer::RestartEach),
+        ];
+        for (label, idle_timer) in idle_timers {
+            group.bench_function(BenchmarkId::new(label, senders), |b| {
+                b.to_async(&rt).iter_custom(|iters| async move {
+                    measure(
+                        iters,
+                        || {
+                            let actor = IdleTimeout {
+                                messages: share * senders,
+                                idle_timer,
+                            };
+                            (actor, ActorConfig::default())
+                        },
+                        |root| {
+                            for _ in 0..senders {
+                                let root = root.clone();
+                                tokio::spawn(async move {
+                                    for _ in 0..share {
+                                        root.tell(Tick);
+                                    }
+                                });
+                            }
+                        },
+                    )
+                    .await
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 fn runtime() -> Runtime {
     Builder::new_multi_thread()
         .worker_threads(WORKER_THREADS)
@@ -211,6 +263,7 @@ struct Countdown {
 
 impl Actor for Countdown {
     type Message = Tick;
+    type Timers = Untimed;
     type State = usize;
     type Error = Infallible;
 
@@ -243,6 +296,7 @@ struct Probing {
 
 impl Actor for Probing {
     type Message = Tick;
+    type Timers = Untimed;
     type State = usize;
     type Error = Infallible;
 
@@ -267,6 +321,55 @@ impl Actor for Probing {
     }
 }
 
+/// Whether the actor starts no idle timer, starts one in `init` and leaves it pending, or restarts
+/// one on every message.
+#[derive(Clone, Copy)]
+enum IdleTimer {
+    None,
+    ArmedIdle,
+    RestartEach,
+}
+
+/// A countdown which starts an idle timer as its `idle_timer` says. The timer's delay outlasts the
+/// run, so it never fires.
+struct IdleTimeout {
+    messages: usize,
+    idle_timer: IdleTimer,
+}
+
+impl Actor for IdleTimeout {
+    type Message = Tick;
+    type Timers = Timed;
+    type State = usize;
+    type Error = Infallible;
+
+    fn init(
+        &self,
+        context: &ActorContext<Self::Message, Timed>,
+    ) -> Result<Self::State, Self::Error> {
+        match self.idle_timer {
+            IdleTimer::ArmedIdle => context.start_timer("idle", Tick, IDLE_TIMEOUT),
+
+            IdleTimer::None | IdleTimer::RestartEach => {}
+        }
+        Ok(self.messages)
+    }
+
+    fn receive(
+        &self,
+        context: &ActorContext<Self::Message, Timed>,
+        _: Incoming<Self::Message>,
+        remaining: Self::State,
+    ) -> Result<Control<Self::State>, Self::Error> {
+        match self.idle_timer {
+            IdleTimer::RestartEach => context.start_timer("idle", Tick, IDLE_TIMEOUT),
+
+            IdleTimer::None | IdleTimer::ArmedIdle => {}
+        }
+        Ok(next_control(remaining))
+    }
+}
+
 struct Go;
 
 struct PingPongRoot {
@@ -276,6 +379,7 @@ struct PingPongRoot {
 
 impl Actor for PingPongRoot {
     type Message = Go;
+    type Timers = Untimed;
     type State = usize;
     type Error = Infallible;
 
@@ -314,6 +418,7 @@ struct Pinger {
 
 impl Actor for Pinger {
     type Message = Pong;
+    type Timers = Untimed;
     type State = Pinging;
     type Error = Infallible;
 
@@ -359,6 +464,7 @@ struct Ponger {
 
 impl Actor for Ponger {
     type Message = Ping;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -385,6 +491,7 @@ struct FanOutRoot {
 
 impl Actor for FanOutRoot {
     type Message = Go;
+    type Timers = Untimed;
     type State = FanningOut;
     type Error = Infallible;
 
@@ -445,6 +552,6 @@ criterion_group!(
         .noise_threshold(0.05)
         .warm_up_time(Duration::from_secs(3))
         .measurement_time(Duration::from_secs(10));
-    targets = flood, ping_pong, fan_out, queued
+    targets = flood, ping_pong, fan_out, queued, timers
 );
 criterion_main!(benches);

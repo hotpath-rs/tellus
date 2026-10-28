@@ -31,6 +31,8 @@ The [`EventSourced`](../tellus/src/persistence/event_sourced.rs) trait follows
 - `Command` is the type of the received messages; `Event` and `Snapshot` are the persisted types,
   both [`Versioned`](../tellus/src/persistence/versioned.rs) for schema evolution; actors without
   snapshots use the uninhabited `Nothing`.
+- `Timers` is the timer mode, `Untimed` or `Timed`, as for `Actor` (see
+  [actors.md](actors.md#timers)).
 - `persistence_id` names the actor's event stream.
 - `init` is the pure seed of the fold and `init_from_snapshot` its snapshot-based alternative;
   `recovered` runs once after recovery and is the place to touch the world.
@@ -71,6 +73,12 @@ On every spawn and every restart, before the first command:
 `init` is skipped entirely when a snapshot exists, so it must be nothing but the pure seed of the
 fold; world-touching work in `init` would silently disappear the moment snapshots are enabled.
 `recovered` always runs, and never during replay.
+
+A `Timed` event-sourced actor starts its timers (see [actors.md](actors.md#timers)) in `recovered`
+and `handle`; `init` has no context. A timer is runtime state, neither persisted nor recreated by
+replay, and a restart cancels it. `recovered` runs on every restart, so it is where to start the
+timer again. A `then` continuation gets only the state and has no context, so it cannot start a
+timer.
 
 ## Replay and live execution
 
@@ -182,7 +190,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tellus::{
     ActorContext, Effect, EventSourced, Incoming, Nothing, PersistenceId, ReplyTo,
-    SchemaVersion, Versioned,
+    SchemaVersion, Untimed, Versioned,
     testing::{TestContext, settle},
 };
 
@@ -203,6 +211,7 @@ impl Versioned for Increased {
 
 impl EventSourced for Counter {
     type Command = Command;
+    type Timers = Untimed;
     type Event = Increased;
     type State = u64;
     type Snapshot = Nothing;

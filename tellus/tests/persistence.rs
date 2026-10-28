@@ -18,12 +18,12 @@ use tellus::{
     Control, Effect, EncodeError, EncodedEvent, EncodedSnapshot, EventSourced, EventStore,
     InMemoryStore, Incoming, Nothing, PayloadError, Persistence, PersistenceId, ReplyTo,
     RestartPolicy, SchemaVersion, SeqNo, SnapshotStore, StoredEvent, StoredSnapshot,
-    SupervisionStrategy, Versioned,
+    SupervisionStrategy, Timed, Untimed, Versioned,
 };
 use thiserror::Error;
 use tokio::{
     sync::mpsc,
-    time::{sleep, timeout},
+    time::{advance, sleep, timeout},
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -871,6 +871,124 @@ async fn a_panicking_snapshot_save_error_keeps_the_actor_running() {
     assert_eq!(inits, 1, "the actor must not restart");
 }
 
+/// A timer started in `handle` is received by an event-sourced actor like a command once its delay
+/// has elapsed: here its message persists an event.
+#[tokio::test(start_paused = true)]
+async fn an_event_sourced_actor_receives_its_timer() {
+    let (probe_tx, _probe_rx) = mpsc::unbounded_channel();
+
+    let system = ActorSystem::event_sourced(
+        TimedCounter::new("21", probe_tx),
+        Persistence::new(FaultyStore::default()),
+    );
+
+    system.root().tell(Command::StartTimer);
+    assert_eq!(ask_count(&system).await, 0);
+
+    advance(Duration::from_secs(1)).await;
+    // Only the second get is sure to follow the due timer.
+    ask_count(&system).await;
+    assert_eq!(ask_count(&system).await, 1);
+
+    system.root().tell(Command::Stop);
+    assert_terminates(system, "system did not terminate").await;
+}
+
+/// The modes of parent and child are independent: a timed event-sourced child of an untimed
+/// parent receives its timer.
+#[tokio::test(start_paused = true)]
+async fn an_untimed_parent_spawns_a_timed_event_sourced_child() {
+    let (probe_tx, _probe_rx) = mpsc::unbounded_channel();
+    let (child_tx, mut children) = mpsc::unbounded_channel();
+    let system = ActorSystem::new(UntimedParent {
+        store: FaultyStore::default(),
+        probe_tx,
+        child_tx,
+    });
+
+    let child = recv(&mut children, "child not spawned").await;
+    assert_eq!(ask_child_count(&child).await, 0);
+
+    advance(Duration::from_secs(1)).await;
+    // Only the second get is sure to follow the due timer.
+    ask_child_count(&child).await;
+    assert_eq!(ask_child_count(&child).await, 1);
+
+    system.root().tell(());
+    assert_terminates(system, "system did not terminate").await;
+}
+
+/// The modes of parent and child are independent: an untimed event-sourced child of a timed
+/// parent handles its commands.
+#[tokio::test]
+async fn a_timed_parent_spawns_an_untimed_event_sourced_child() {
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+    let (child_tx, mut children) = mpsc::unbounded_channel();
+    let system = ActorSystem::new(TimedParent {
+        store: FaultyStore::default(),
+        probe_tx,
+        child_tx,
+    });
+
+    let child = recv(&mut children, "child not spawned").await;
+    child.tell(WatcherCommand::StopChild);
+    assert_eq!(
+        recv(&mut probe_rx, "child did not see its child stop").await,
+        Probe::Terminated
+    );
+
+    system.root().tell(());
+    assert_terminates(system, "system did not terminate").await;
+}
+
+/// A timer started in `recovered`, before the first command, is received like one started in
+/// `handle`: here its message persists an event.
+#[tokio::test(start_paused = true)]
+async fn an_event_sourced_actor_receives_a_timer_started_in_recovered() {
+    let (probe_tx, _probe_rx) = mpsc::unbounded_channel();
+
+    let system = ActorSystem::event_sourced(
+        TimedCounter::new("23", probe_tx).with_timer_on_recovery(),
+        Persistence::new(FaultyStore::default()),
+    );
+
+    assert_eq!(ask_count(&system).await, 0);
+
+    advance(Duration::from_secs(1)).await;
+    // Only the second get is sure to follow the due timer.
+    ask_count(&system).await;
+    assert_eq!(ask_count(&system).await, 1);
+
+    system.root().tell(Command::Stop);
+    assert_terminates(system, "system did not terminate").await;
+}
+
+/// A restart drops an event-sourced actor's timers: they are runtime state, neither persisted nor
+/// recreated by replay. Here `recovered` does not start "t" again, so the next incarnation never
+/// receives it.
+#[tokio::test(start_paused = true)]
+async fn a_restart_drops_an_event_sourced_actors_timer() {
+    let (probe_tx, _probe_rx) = mpsc::unbounded_channel();
+
+    let system = ActorSystem::event_sourced_with_config(
+        TimedCounter::new("22", probe_tx),
+        Persistence::new(FaultyStore::default()),
+        restart_config(),
+    );
+
+    system.root().tell(Command::StartTimer);
+    system.root().tell(Command::Fail);
+    assert_eq!(ask_count(&system).await, 0);
+
+    advance(Duration::from_secs(1)).await;
+    // Only the second get is sure to come behind a due timer which the restart kept.
+    ask_count(&system).await;
+    assert_eq!(ask_count(&system).await, 0);
+
+    system.root().tell(Command::Stop);
+    assert_terminates(system, "system did not terminate").await;
+}
+
 /// Global, as a thread-local subscriber races with the callsite interest cache of parallel tests.
 fn init_tracing() {
     TRACING.call_once(|| {
@@ -896,6 +1014,22 @@ where
         .await
         .expect(not_terminated)
         .expect("watching the root actor failed");
+}
+
+/// Round-trip a `Get`, so the actor has handled everything told before.
+async fn ask_count(system: &ActorSystem<Command>) -> u64 {
+    system
+        .root()
+        .ask(TIMEOUT, Command::Get)
+        .await
+        .expect("no reply to get")
+}
+
+async fn ask_child_count(child: &ActorRef<Command>) -> u64 {
+    child
+        .ask(TIMEOUT, Command::Get)
+        .await
+        .expect("no reply to get")
 }
 
 fn restart_config() -> ActorConfig {
@@ -933,10 +1067,24 @@ impl Counter {
         self.recovered_failures = Mutex::new(failures);
         self
     }
+
+    /// Fails as often as configured via [Counter::with_recovered_failures], then succeeds.
+    fn recovered_failure(&self) -> Result<(), Boom> {
+        let mut failures = self
+            .recovered_failures
+            .lock()
+            .expect("recovered failures lock poisoned");
+        if *failures > 0 {
+            *failures -= 1;
+            return Err(Boom);
+        }
+        Ok(())
+    }
 }
 
 impl EventSourced for Counter {
     type Command = Command;
+    type Timers = Untimed;
     type Event = Increased;
     type State = u64;
     type Snapshot = Count;
@@ -961,17 +1109,7 @@ impl EventSourced for Counter {
         _: &ActorContext<Self::Command>,
         state: Self::State,
     ) -> Result<Self::State, Self::Error> {
-        {
-            let mut failures = self
-                .recovered_failures
-                .lock()
-                .expect("recovered failures lock poisoned");
-            if *failures > 0 {
-                *failures -= 1;
-                return Err(Boom);
-            }
-        }
-
+        self.recovered_failure()?;
         let _ = self.probe_tx.send(Probe::Recovered);
         Ok(state)
     }
@@ -986,25 +1124,7 @@ impl EventSourced for Counter {
             return Ok(Effect::none());
         };
         let _ = self.probe_tx.send(Probe::Handled);
-
-        match command {
-            Command::Increment(n) => {
-                let probe_tx = self.probe_tx.clone();
-                Ok(Effect::persist(Increased(n)).then(move |count| {
-                    let _ = probe_tx.send(Probe::Settled(*count));
-                }))
-            }
-
-            Command::IncrementTwice(n, m) => Ok(Effect::persist_all([Increased(n), Increased(m)])),
-
-            Command::Get(reply_to) => Ok(Effect::none().then(move |count| reply_to.reply(*count))),
-
-            Command::Fail => Err(Boom),
-
-            Command::Stop => Ok(Effect::stop()),
-
-            Command::StopAfter(n) => Ok(Effect::persist(Increased(n)).and_stop()),
-        }
+        counter_effect(&self.probe_tx, command)
     }
 
     fn apply(&self, state: Self::State, Increased(n): Self::Event) -> Self::State {
@@ -1019,6 +1139,87 @@ impl EventSourced for Counter {
     }
 }
 
+/// A [Counter] declaring timers: it starts the timer "t" on [Command::StartTimer] and, if
+/// configured, in `recovered`.
+struct TimedCounter {
+    counter: Counter,
+    timer_on_recovery: bool,
+}
+
+impl TimedCounter {
+    fn new(entity_id: &'static str, probe_tx: mpsc::UnboundedSender<Probe>) -> Self {
+        Self {
+            counter: Counter::new(entity_id, probe_tx),
+            timer_on_recovery: false,
+        }
+    }
+
+    fn with_timer_on_recovery(mut self) -> Self {
+        self.timer_on_recovery = true;
+        self
+    }
+}
+
+impl EventSourced for TimedCounter {
+    type Command = Command;
+    type Timers = Timed;
+    type Event = Increased;
+    type State = u64;
+    type Snapshot = Count;
+    type Error = Boom;
+
+    fn persistence_id(&self) -> PersistenceId {
+        self.counter.persistence_id()
+    }
+
+    fn init(&self) -> Result<Self::State, Self::Error> {
+        self.counter.init()
+    }
+
+    fn init_from_snapshot(&self, snapshot: Self::Snapshot) -> Result<Self::State, Self::Error> {
+        self.counter.init_from_snapshot(snapshot)
+    }
+
+    fn recovered(
+        &self,
+        context: &ActorContext<Self::Command, Timed>,
+        state: Self::State,
+    ) -> Result<Self::State, Self::Error> {
+        self.counter.recovered_failure()?;
+        if self.timer_on_recovery {
+            context.start_timer("t", Command::Increment(1), Duration::from_secs(1));
+        }
+        let _ = self.counter.probe_tx.send(Probe::Recovered);
+        Ok(state)
+    }
+
+    fn handle(
+        &self,
+        context: &ActorContext<Self::Command, Timed>,
+        incoming: Incoming<Self::Command>,
+        _: &Self::State,
+    ) -> Result<Effect<Self>, Self::Error> {
+        let Incoming::Message(command) = incoming else {
+            return Ok(Effect::none());
+        };
+        let _ = self.counter.probe_tx.send(Probe::Handled);
+
+        if let Command::StartTimer = command {
+            context.start_timer("t", Command::Increment(1), Duration::from_secs(1));
+            return Ok(Effect::none());
+        }
+        counter_effect(&self.counter.probe_tx, command)
+    }
+
+    fn apply(&self, state: Self::State, event: Self::Event) -> Self::State {
+        self.counter.apply(state, event)
+    }
+
+    fn snapshot(&self, state: &Self::State) -> Result<Option<Self::Snapshot>, Self::Error> {
+        self.counter.snapshot(state)
+    }
+}
+
 #[derive(Debug)]
 enum Command {
     Increment(u64),
@@ -1027,6 +1228,7 @@ enum Command {
     Fail,
     Stop,
     StopAfter(u64),
+    StartTimer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1086,6 +1288,7 @@ struct Watcher {
 
 impl EventSourced for Watcher {
     type Command = WatcherCommand;
+    type Timers = Untimed;
     type Event = Nothing;
     type State = Option<ActorRef<()>>;
     type Snapshot = Nothing;
@@ -1165,6 +1368,7 @@ struct Child {
 
 impl Actor for Child {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -1198,6 +1402,7 @@ struct Parent {
 
 impl Actor for Parent {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -1213,6 +1418,88 @@ impl Actor for Parent {
     fn receive(
         &self,
         _: &ActorContext<Self::Message>,
+        incoming: Incoming<Self::Message>,
+        state: Self::State,
+    ) -> Result<Control<Self::State>, Self::Error> {
+        match incoming {
+            Incoming::Message(()) => Ok(Control::Stop),
+            Incoming::Terminated(_) => Ok(Control::Continue(state)),
+        }
+    }
+}
+
+/// Spawns a [TimedCounter] with a timer started in `recovered` and hands its reference out.
+struct UntimedParent {
+    store: FaultyStore,
+    probe_tx: mpsc::UnboundedSender<Probe>,
+    child_tx: mpsc::UnboundedSender<ActorRef<Command>>,
+}
+
+impl Actor for UntimedParent {
+    type Message = ();
+    type Timers = Untimed;
+    type State = ();
+    type Error = Infallible;
+
+    fn init(&self, context: &ActorContext<Self::Message>) -> Result<Self::State, Self::Error> {
+        let child = context.spawn_event_sourced(
+            TimedCounter::new("31", self.probe_tx.clone()).with_timer_on_recovery(),
+            Persistence::new(self.store.clone()),
+        );
+        self.child_tx
+            .send(child)
+            .expect("test dropped the receiver");
+        Ok(())
+    }
+
+    fn receive(
+        &self,
+        _: &ActorContext<Self::Message>,
+        incoming: Incoming<Self::Message>,
+        state: Self::State,
+    ) -> Result<Control<Self::State>, Self::Error> {
+        match incoming {
+            Incoming::Message(()) => Ok(Control::Stop),
+            Incoming::Terminated(_) => Ok(Control::Continue(state)),
+        }
+    }
+}
+
+/// Spawns an untimed [Watcher] and hands its reference out; timed itself, with a timer no test
+/// waits for.
+struct TimedParent {
+    store: FaultyStore,
+    probe_tx: mpsc::UnboundedSender<Probe>,
+    child_tx: mpsc::UnboundedSender<ActorRef<WatcherCommand>>,
+}
+
+impl Actor for TimedParent {
+    type Message = ();
+    type Timers = Timed;
+    type State = ();
+    type Error = Infallible;
+
+    fn init(
+        &self,
+        context: &ActorContext<Self::Message, Timed>,
+    ) -> Result<Self::State, Self::Error> {
+        context.start_timer("t", (), Duration::from_secs(3600));
+        let child = context.spawn_event_sourced(
+            Watcher {
+                probe_tx: self.probe_tx.clone(),
+                bye_before_stopping: false,
+            },
+            Persistence::new(self.store.clone()),
+        );
+        self.child_tx
+            .send(child)
+            .expect("test dropped the receiver");
+        Ok(())
+    }
+
+    fn receive(
+        &self,
+        _: &ActorContext<Self::Message, Timed>,
         incoming: Incoming<Self::Message>,
         state: Self::State,
     ) -> Result<Control<Self::State>, Self::Error> {
@@ -1416,4 +1703,34 @@ struct ErrorHooks {
     panicking: bool,
     displayed: AtomicBool,
     dropped: AtomicBool,
+}
+
+/// The effect of a counter command, shared by [Counter] and [TimedCounter].
+fn counter_effect<A>(
+    probe_tx: &mpsc::UnboundedSender<Probe>,
+    command: Command,
+) -> Result<Effect<A>, Boom>
+where
+    A: EventSourced<Command = Command, Event = Increased, State = u64, Error = Boom>,
+{
+    match command {
+        Command::Increment(n) => {
+            let probe_tx = probe_tx.clone();
+            Ok(Effect::persist(Increased(n)).then(move |count| {
+                let _ = probe_tx.send(Probe::Settled(*count));
+            }))
+        }
+
+        Command::IncrementTwice(n, m) => Ok(Effect::persist_all([Increased(n), Increased(m)])),
+
+        Command::Get(reply_to) => Ok(Effect::none().then(move |count| reply_to.reply(*count))),
+
+        Command::Fail => Err(Boom),
+
+        Command::Stop => Ok(Effect::stop()),
+
+        Command::StopAfter(n) => Ok(Effect::persist(Increased(n)).and_stop()),
+
+        Command::StartTimer => unreachable!("only a TimedCounter is told StartTimer"),
+    }
 }

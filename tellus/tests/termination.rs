@@ -10,7 +10,7 @@ use std::{
     thread,
     time::Duration,
 };
-use tellus::{Actor, ActorContext, ActorRef, ActorSystem, Control, Incoming, Nothing};
+use tellus::{Actor, ActorContext, ActorRef, ActorSystem, Control, Incoming, Nothing, Untimed};
 use thiserror::Error;
 use tokio::{
     runtime::Builder,
@@ -333,6 +333,7 @@ struct Root(Terminated);
 
 impl Actor for Root {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -356,6 +357,7 @@ struct Enduring(Terminated);
 
 impl Actor for Enduring {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -383,6 +385,7 @@ struct Blocking {
 
 impl Actor for Blocking {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -408,6 +411,7 @@ struct Child(Terminated);
 
 impl Actor for Child {
     type Message = Nothing;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -435,6 +439,7 @@ struct GrandChild {
 
 impl Actor for GrandChild {
     type Message = Nothing;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -457,6 +462,7 @@ struct Echo(mpsc::Sender<()>);
 
 impl Actor for Echo {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -481,6 +487,7 @@ struct SelfSender {
 
 impl Actor for SelfSender {
     type Message = SelfSend;
+    type Timers = Untimed;
     type State = usize;
     type Error = Infallible;
 
@@ -526,6 +533,7 @@ enum FairMessage {
 
 impl Actor for FairLoop {
     type Message = FairMessage;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -574,6 +582,7 @@ impl Drop for PanickingActor {
 
 impl Actor for PanickingActor {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -595,6 +604,7 @@ struct PanickingStateRoot(mpsc::Sender<ActorRef<Nothing>>);
 
 impl Actor for PanickingStateRoot {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -617,6 +627,7 @@ struct PanickingStateChild;
 
 impl Actor for PanickingStateChild {
     type Message = Nothing;
+    type Timers = Untimed;
     type State = PanickingState;
     type Error = Infallible;
 
@@ -646,6 +657,7 @@ struct FailingWithPanickingState;
 
 impl Actor for FailingWithPanickingState {
     type Message = ();
+    type Timers = Untimed;
     type State = PanickingState;
     type Error = Boom;
 
@@ -672,6 +684,7 @@ struct Observer(mpsc::Sender<Observed>);
 
 impl Actor for Observer {
     type Message = ActorRef<Nothing>;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -728,6 +741,7 @@ struct HostileFailure {
 
 impl Actor for HostileFailure {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = HostileError;
 

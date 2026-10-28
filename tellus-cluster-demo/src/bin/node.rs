@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tellus::{
-    Actor, ActorContext, ActorSystem, Control, Incoming, ReplyTo,
+    Actor, ActorContext, ActorSystem, Control, Incoming, ReplyTo, Untimed,
     cluster::{
         self, BootstrapConfig, Change, ClusterState, EndpointConfig, Key, Manifest, Member,
         MemberState, SeedDiscovery, Transition,
@@ -237,6 +237,7 @@ struct Worker {
 
 impl Actor for Worker {
     type Message = Job;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -296,6 +297,7 @@ struct Listener {
 
 impl Actor for Listener {
     type Message = Event;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 

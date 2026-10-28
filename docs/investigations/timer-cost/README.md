@@ -47,8 +47,21 @@ optimization, not to the timers. #174's own candidate (`exp/timers-inline-gate`,
 gate inlined over the `Queued` item, swept by the contributor) fails two x86_64 rows at +5.6 and
 +5.7% with five more borderline. The cursor with the timer poll folded into the mailbox's waiting
 future (`exp/timers-cursor-combined`, `f55717e`) fails eight x86_64 rows at +7.4 to +17.4% and
-`flood/bounded` on the N2 at +5.0%, the worst result of any variant. No variant passes every row,
-and every bounded loop variant on `main`'s receive has failed the x86_64 throughput rows.
+`flood/bounded` on the N2 at +5.0%, the worst result of any variant. Every loop variant under the
+universal timer API failed the x86_64 throughput rows, so timers became an opt-in per actor type
+(`feat/timers-opt-in`, swept as `077c74a`): the untimed loop is `main`'s per function on the message
+path, and the sweep passes eighteen rows with none failing or borderline; N2 `flood/bounded` is
+inconclusive by too few jobs passing A/A and x86_64 `flood/unbounded` by spread, both with the
+candidate within ±2.3% in every job. That is the first variant without a failing row. A confirmation
+run (40499387401) under a protocol extension recorded before it passes the two rows and leaves
+x86_64 `flood/bounded` undecided by two A/A failures, where the first run passed it, so the
+candidate is accepted under that extension: every row passes in at least one of the two whole
+sweeps, none fails or is borderline in either. PR #185 carries the implementation. Its review
+fix (`1800f0c`) touches only the timed path. Two whole messaging sweeps of it pass every row but N2
+`flood/bounded`, which is inconclusive in both by too few jobs passing A/A. The maintainer accepts
+the fix on the messaging bench as an exception, with the reason recorded below. Two whole
+persistence sweeps accept it under the confirmation rule.
+
 ## What #174 changes on every actor's path
 
 All of this applies whether or not an actor starts a timer:
@@ -1023,6 +1036,202 @@ by 10 to 17%, so the call alone does not explain the result. The variant fails t
 is not a candidate. With it, every bounded loop variant on `main`'s receive has failed the x86_64
 throughput rows: the plain cursor, the single select, the combined future and #174's own candidate.
 
+## Timers as an opt-in per actor type
+
+The decision of 2026-10-27 implemented: `feat/timers-opt-in`, swept as `077c74a`, one commit on
+`main` at `ac59a98`; the later commits of the branch add this record, the protocol extension below
+and the review fix described at the end of this section. `Actor` and `EventSourced` gain `type
+Timers: TimerMode;` with the two sealed modes `Untimed` and `Timed`; the context is `ActorContext<M,
+T = Untimed>`, and `start_timer` and `cancel_timer` exist only on `ActorContext<M, Timed>`. `spawn`
+dispatches on `A::Timers` through the sealed trait to one of two functions, each with its own task
+future: the untimed one expands `main`'s wait macro, the timed one the cursor's, from one macro over
+`main`'s loop body. Neither loop checks the mode, and the timer table of a timed actor lives in its
+context from the start (`RefCell<TimerTable<M>>`, no `Option`, no box). An untimed actor cannot call
+`start_timer`, and no code outside tellus can call the dispatch: both are pinned by `compile_fail`
+doctests and were checked from a separate crate (E0599 and E0277; a diverging expression such as
+`unreachable!()` type-checks as the private token, so the call can be written but never executed).
+Every `impl Actor` and `impl EventSourced` in the workspace gained `type Timers = Untimed;` (178
+sites); the timer tests' actors and the bench's `IdleTimeout` are `Timed`. Four tests pin that
+parent and child modes are independent, for plain and event-sourced children.
+
+Generated code against `main`, both architectures, bench binaries built with v0 symbol mangling and
+the candidate's names normalized (`spawn_untimed` to `spawn`, the `Untimed` argument dropped):
+
+- The select poll functions, the recv futures (two out of line as on `main`), flume's `send`,
+  `Shared::recv` and `pull_pending`, `receive_incoming` and `should_restart` are identical in
+  instruction count on both architectures; on x86_64 `tell` is identical too.
+- The untimed run loop futures grow by 5 to 7 instructions on aarch64 and 6 to 8 on x86_64. The
+  diff is confined to the path handling a terminated signal: `HashMap::remove` in
+  `take_watched_for` is now inlined there (`hash_one` plus `RawTable::remove_entry` instead of one
+  call), the rest is branch offsets. The per-message path is unchanged.
+- On aarch64 `ActorRef::tell` has 7 instructions fewer by block layout and tail merging (one
+  epilogue copy less, no change in loads, stores or calls).
+- Outside the message path, inlining moved: `WatcherRegistration::close` 354 to 116 instructions,
+  `unwatch` 114 to 31 on aarch64 and 25 to 189 on x86_64, `WatcherRegistry::remove` out of line,
+  `PingPongRoot::receive` out of line, `Pinger::init` 69 to 79 (it now calls the dispatcher).
+- `ActorContext<Tick>` stays 144 bytes; `ActorContext<Tick, Timed>` is 304 bytes. The untimed run
+  loop futures have `main`'s sizes exactly (`-Zprint-type-sizes`: `Countdown` 1016 bytes,
+  `FanOutRoot` and `Pinger` 1064, `PingPongRoot` and `Probing` 1040, `Ponger` 1128); the timed
+  `IdleTimeout` future is 1520 bytes.
+
+Checks before the sweep: `just lint` (the full matrix), `just test` with the cluster test rerun
+alone after a timing failure under four concurrent release builds, `just doc`, the comparison
+crate's check and lint, the `#[ignore]`d fairness test, `just profile` (`mailbox::recv` at 110000
+calls) and the allocation gate (0 B).
+
+Timed actors, the `timers` group locally (aarch64, 10 cores, one stack position), the candidate
+against the plain cursor `de24ce8`, three rounds of two runs each per binary, so the A/A spread is
+the median of a binary's second runs against its first:
+
+| Row | Candidate against cursor | A/A cursor | A/A candidate |
+|---|---|---|---|
+| `timers/none/4` | +2.7% | +0.4% | +0.1% |
+| `timers/none/16` | +2.4% | +0.2% | +0.4% |
+| `timers/armed_idle/4` | +5.6% | +0.8% | +0.3% |
+| `timers/armed_idle/16` | +5.9% | +0.7% | -0.1% |
+| `timers/restart_each/4` | -2.6% | -0.9% | +0.9% |
+| `timers/restart_each/16` | -1.5% | +0.3% | -0.7% |
+
+The `none` rows compare the candidate's timed loop, which a `Timed` actor runs from its first
+message, with the cursor's untimed loop, which the cursor ran until the first `start_timer`: 2.4 to
+2.7% is the price of declaring timers without using them, at this position. The `armed_idle` rows
+are 5.6 to 5.9% slower than the cursor with an A/A spread below 1%, so this is a real difference at
+this position; both binaries run the same wait macro, and the candidate's context holds the table
+inline (304 bytes) where the cursor's boxed it. `restart_each` is faster. None of these rows is a
+gate; they are recorded for the design of the timed loop.
+
+Run 40490137650:
+
+| Row | Opt-in N2 | Opt-in x86 |
+|---|---|---|
+| `queued/never/4` | pass, -3.1% | pass, +0.2% |
+| `queued/never/16` | pass, -2.6% | pass, +0.2% |
+| `queued/every/4` | pass, -3.6% | pass, -0.3% |
+| `queued/every/16` | pass, -1.0% | pass, -0.3% |
+| `flood/unbounded` | pass, -0.0% | spread, +0.4% |
+| `flood/bounded` | too few jobs, -2.3 to +1.2% | pass, -1.1% |
+| `fan_out/workers/4` | pass, +0.1% | pass, +0.3% |
+| `fan_out/workers/16` | pass, -1.4% | pass, +0.3% |
+| `ping_pong/pairs/1` | pass, +1.0% | pass, +1.2% |
+| `ping_pong/pairs/4` | pass, +0.2% | pass, -0.5% |
+
+CPU coverage: four Neoverse-N2 jobs; on x86_64 three EPYC 7763 and one EPYC 9V45, so neither the
+EPYC 9V74 nor the Xeon 6973P-C was drawn. Eighteen rows pass and none fails or is borderline; this
+is the first variant without a failing row. Eighteen passes and two inconclusive rows are not
+twenty passes, so the gate is not passed by this run. The two rows are undecided, not failed. N2
+`flood/bounded` has only two of four jobs passing A/A (the others measured +4.6 and -4.5% on
+identical code) and the candidate at -2.3 to +1.2% in all four, so there the runners decided
+nothing. x86_64 `flood/unbounded` has a spread of 6.1 points among the three jobs which passed A/A
+(-2.1, +4.6 and -1.5%, and the +4.6% job's own A/A was +2.4%), with a median of +0.4%; runner noise
+is one explanation of that spread, not an established one. Under the protocol a second run decides
+borderline rows only, so these two stay inconclusive as measured; the confirmation run below
+follows the extension added to the protocol for this case.
+
+The confirmation run, 40499387401 on `bcabb43` (the same code plus this record), evaluated whole:
+
+| Row | Opt-in N2, run 2 | Opt-in x86, run 2 |
+|---|---|---|
+| `queued/never/4` | pass, -4.1% | pass, +0.3% |
+| `queued/never/16` | pass, -3.4% | pass, -0.1% |
+| `queued/every/4` | pass, -3.9% | pass, -0.4% |
+| `queued/every/16` | pass, -2.0% | pass, -0.0% |
+| `flood/unbounded` | pass, +0.1% | pass, -0.5% |
+| `flood/bounded` | pass, +0.9% | too few jobs, -2.3 to +1.3% |
+| `fan_out/workers/4` | pass, +1.0% | pass, +0.5% |
+| `fan_out/workers/16` | pass, -0.8% | pass, +0.4% |
+| `ping_pong/pairs/1` | pass, +0.7% | pass, +2.5% |
+| `ping_pong/pairs/4` | pass, +0.1% | pass, -0.5% |
+
+CPU coverage: four Neoverse-N2 jobs; on x86_64 two EPYC 7763, one EPYC 9V74 and one EPYC 9V45. All
+ten N2 rows pass, including `flood/bounded`, undecided in the first run. On x86_64 nine rows pass,
+including `flood/unbounded`, undecided in the first run; `flood/bounded` is undecided here because
+two jobs failed A/A (-5.4 and -4.0% on identical code), and it passed in the first run at -1.1%.
+Over the two runs every row passes in at least one and no row fails or is borderline in either, so
+the candidate is accepted under the confirmation rule. That rule is an extension of the original
+gate, added for this case before the run, and the acceptance is described as such, not as twenty
+passes in one sweep. The N2 `queued` rows are again 2 to 4% faster than `main`.
+
+The code review of #185 found one ordering defect, inherited from the cursor: `fire_due_timers`
+read the mailbox depth before the clock. A deadline passing between the two reads hence gave its
+timer the earlier position, ahead of a message queued in between, which had arrived before that
+deadline. The table now takes both samples itself, the clock first. A unit test passes a sampler
+pair which changes the world between the two reads; it fails against the old order. The fix
+touches only the timed path. Against the reviewed commit, the untimed run loops, their select polls
+and the message functions keep their instruction counts on both architectures. On x86_64 their
+stripped disassembly is identical. On aarch64 it differs in address immediates only, and the linker
+inserted one Cortex-A53 erratum 843419 veneer into flume's async `recv` for `Tick`, after
+`lock_contended`, which costs two branches on the contended mutex path. The N2 `queued` rows are 1
+to 3.6% faster than `main`, which the generated code does not explain (the message path is
+identical per function); A/A on those jobs is within ±1.4%, so the difference is real for this
+build and position, and it is recorded, not claimed as a property of the change.
+
+The fixed commit, swept as `1800f0c` against `main` at `ac59a98`, on the messaging bench, run
+40518363938 and its confirmation run 40538689771, each evaluated whole:
+
+| Row | N2, run 1 | N2, run 2 | x86, run 1 | x86, run 2 |
+|---|---|---|---|---|
+| `queued/never/4` | pass, -1.5% | pass, -3.2% | pass, +1.5% | pass, -0.0% |
+| `queued/never/16` | pass, -1.4% | pass, -3.0% | pass, +1.9% | pass, +0.4% |
+| `queued/every/4` | pass, -2.4% | pass, -2.4% | pass, +0.5% | pass, -0.2% |
+| `queued/every/16` | pass, -2.2% | pass, -2.2% | pass, +0.7% | pass, -0.0% |
+| `flood/unbounded` | pass, -0.7% | pass, -0.5% | pass, +0.2% | pass, -0.6% |
+| `flood/bounded` | too few jobs | too few jobs | spread, +5.0% | pass, +0.9% |
+| `fan_out/workers/4` | pass, -0.3% | pass, -0.4% | pass, +0.5% | pass, +1.0% |
+| `fan_out/workers/16` | pass, +0.7% | pass, +0.7% | pass, +0.9% | pass, -1.5% |
+| `ping_pong/pairs/1` | pass, +0.5% | pass, +0.1% | pass, +0.8% | pass, +0.2% |
+| `ping_pong/pairs/4` | pass, +0.3% | pass, +0.1% | pass, +0.1% | pass, +0.3% |
+
+CPU coverage: run 1 has three Neoverse-N2 jobs, and on x86_64 three EPYC 7763 and one EPYC 9V45.
+Run 2 has four Neoverse-N2 jobs, and on x86_64 one each of EPYC 9V45, EPYC 9V74, Xeon 6973P-C and
+Xeon Platinum 8573C. No row fails or is borderline in either run. x86_64 `flood/bounded` had a
+spread of 10.9 points in run 1 and passed in run 2. N2 `flood/bounded` kept only two jobs after A/A
+in both runs. A row inconclusive in both runs keeps the candidate pending under the protocol.
+
+The maintainer accepted the fixed commit on the messaging bench as an exception on 2026-10-27. The
+reason is the four null runs of `main` recorded with the protocol (40554618267, 40554629237,
+40554639973 and the label run 40554253825): N2 `flood/bounded` passed in all four, with every job
+kept after A/A and medians from -0.9 to +2.5%. The null runs measure the protocol's noise on
+identical code, not the candidate, so the row stays undecided as measured; the exception does not
+claim otherwise.
+
+The same commit on the persistence bench, with the workflow and scripts of #188 (`--ref
+ci/bench-protocol`), run 40554680520 and its confirmation run 40565297827:
+
+| Row | N2, run 1 | N2, run 2 | x86, run 1 | x86, run 2 |
+|---|---|---|---|---|
+| `persist/no_snapshots` | pass, +1.0% | pass, +0.8% | spread, -0.5% | pass, +0.2% |
+| `persist/snapshots` | pass, +0.5% | pass, +0.6% | pass, +0.1% | pass, -0.2% |
+| `recover/replay` | pass, +0.0% | pass, +0.0% | pass, -0.1% | pass, +0.2% |
+| `recover/snapshot` | pass, -0.1% | pass, -0.1% | pass, -0.2% | pass, +0.3% |
+
+CPU coverage: four Neoverse-N2 jobs in each run. On x86_64, run 1 drew two EPYC 7763 and two EPYC
+9V74, and run 2 one EPYC 7763, two EPYC 9V74 and one Xeon Platinum 8573C. x86_64
+`persist/no_snapshots` had a spread of 6.4 points in run 1 and passed in run 2. Every row passes in
+at least one run and none fails or is borderline in either, so the fixed commit is accepted on the
+persistence bench under the confirmation rule.
+
+The generated code of `ac59a98` against `1800f0c`, compared with `codegen.sh` from #188, which
+resolves every call, branch and data reference to the symbol it points into, marks the rest
+unresolved and never classifies a function with an unresolved reference as identical. The
+candidate's names are normalized with `--rename '_untimed\b='` and `--rename
+', tellus::timers::Untimed>=>'`, on both architectures:
+
+- **Persistence bench:** of the 15 selected functions, 5 are identical: one select poll of the
+  event-sourced run loop, `replay_page`, the event encoding and two settlement wrappers. The other
+  10, the event-sourced run loop itself among them (2412 instructions, 81 unresolved references),
+  match instruction for instruction except in references with no symbol to compare by, such as
+  string literals and `anon` constants. Those references are not established as equal, so these
+  functions are not shown to be identical.
+- **Messaging bench:** the six untimed run loop futures differ by 5 to 8 instructions, as described
+  above. On aarch64, the four `tell` instantiations and flume's async `recv` for `Tick` differ as
+  described above, too.
+- **Not listed above:** on aarch64, `receive_incoming::<PingPongRoot>` goes from 138 to 118
+  instructions, since it calls `PingPongRoot::receive` instead of inlining it. That actor receives
+  one `Go` and one terminated signal per pair, not a message per round. On x86_64 the function
+  differs only in unresolved references.
+- Every other function of the selection is identical or differs only in unresolved references,
+  which are not established as equal.
+
 ## Next steps
 
 - **`fan_out/workers/16`.** The inlined recv future removes the per-message cost on the `queued`,
@@ -1060,6 +1269,13 @@ throughput rows: the plain cursor, the single select, the combined future and #1
   `T` before spawning; the untimed one is `main`'s loop over `main`'s context. The mode is fixed
   per spawn and survives restarts. Opt-in alone establishes nothing: the untimed loop's generated
   code must match `main`'s per function on both architectures, and the unchanged sweep decides.
+  Done, see the opt-in section above: the message path matches per function, and the two whole
+  sweeps accept the candidate under the confirmation rule. The code review on #185 found one
+  ordering defect in the timed path, fixed (see above); the fix is accepted on the persistence
+  bench, and on the messaging bench as a maintainer's exception for N2 `flood/bounded`. What
+  remains is the API
+  discussion on #174 and the `armed_idle` rows of the `timers` group, 5.6 to 5.9% slower than the
+  plain cursor at one local position with the table inline instead of boxed.
 - **The receive optimization.** `main` plus the inlined recv future is faster than `main` on every
   row but N2 `fan_out/workers/16` (+9.0%). It is a core change with its own tradeoff and stays
   experimental until that row is decided; it is not part of the timer decision.
@@ -1077,6 +1293,9 @@ throughput rows: the plain cursor, the single select, the combined future and #1
   probe with `.github/stack-sweep/probe.sh`, and run `.github/stack-sweep/sweep.py run`. The
   binaries go before `--rows` and `--shifts`, since both take a variable number of values. A run
   takes about 1 s here, so a full sweep of 1440 runs takes about 25 minutes.
+- **A confirmation run.** Added on 2026-10-27, before the first such run (opt-in timers), and not
+  shaped by its result. The rule now lives in the
+  [stack sweep protocol](../../../.github/stack-sweep/README.md#a-confirmation-run).
 - **x86_64 assembly from aarch64:** `rustup target add --toolchain 1.99.0 x86_64-unknown-linux-gnu`
   is installed, as are `gcc-x86-64-linux-gnu` and `gdb`. Build with
   `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc` and

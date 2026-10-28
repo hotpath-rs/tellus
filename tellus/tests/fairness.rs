@@ -8,7 +8,7 @@ use std::{
     thread,
     time::Duration,
 };
-use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming};
+use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming, Untimed};
 use tokio::{runtime::Builder, sync::oneshot};
 
 const MESSAGES: usize = 100_000;
@@ -117,6 +117,7 @@ impl Busy {
 
 impl Actor for Busy {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
