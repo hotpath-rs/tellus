@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/tellus-rs/tellus/compare/tellus-bootstrap-k8s-v0.1.0...tellus-bootstrap-k8s-v0.1.1) - 2026-10-28
+
+### Added
+
+- add timers, opt-in per actor via Actor::Timers
+
 ## [0.1.0](https://github.com/tellus-rs/tellus/releases/tag/tellus-bootstrap-k8s-v0.1.0) - 2026-10-21
 
 ### Added
