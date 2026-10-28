@@ -1,7 +1,9 @@
 #![cfg(feature = "test-util")]
 
 use std::{assert_matches, collections::HashMap, convert::Infallible};
-use tellus::{Actor, ActorContext, ActorRef, Control, Incoming, ReplyTo, testing::TestContext};
+use tellus::{
+    Actor, ActorContext, ActorRef, Control, Incoming, ReplyTo, Untimed, testing::TestContext,
+};
 
 // ANCHOR: record
 /// A reading becomes the device's state, without any actor system running.
@@ -79,6 +81,7 @@ struct Group;
 
 impl Actor for Group {
     type Message = GroupMessage;
+    type Timers = Untimed;
     type State = HashMap<&'static str, ActorRef<DeviceMessage>>;
     type Error = Infallible;
 
@@ -125,6 +128,7 @@ struct Device;
 
 impl Actor for Device {
     type Message = DeviceMessage;
+    type Timers = Untimed;
     type State = Option<f64>;
     type Error = Infallible;
 

@@ -170,7 +170,7 @@ fn workspace_output_directory() -> PathBuf {
 mod tellus_bench {
     use crate::{FLOOD_MESSAGES, PING_PONG_ROUNDS, count_down, fan_out_share, measure};
     use std::{convert::Infallible, time::Duration};
-    use tellus::{Actor, ActorContext, ActorRef, ActorSystem, Control, Incoming};
+    use tellus::{Actor, ActorContext, ActorRef, ActorSystem, Control, Incoming, Untimed};
 
     pub async fn flood(iters: u64) -> Duration {
         measure(
@@ -256,6 +256,7 @@ mod tellus_bench {
 
     impl Actor for Countdown {
         type Message = Tick;
+        type Timers = Untimed;
         type State = usize;
         type Error = Infallible;
 
@@ -287,6 +288,7 @@ mod tellus_bench {
 
     impl Actor for Pinger {
         type Message = PingerMessage;
+        type Timers = Untimed;
         type State = Pinging;
         type Error = Infallible;
 
@@ -340,6 +342,7 @@ mod tellus_bench {
 
     impl Actor for Ponger {
         type Message = Ping;
+        type Timers = Untimed;
         type State = ();
         type Error = Infallible;
 

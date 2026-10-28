@@ -1,4 +1,4 @@
-use crate::{Actor, ActorContext, ActorId, ActorRef, Control, Incoming};
+use crate::{Actor, ActorContext, ActorId, ActorRef, Control, Incoming, Untimed};
 use std::{
     any::type_name,
     collections::{HashMap, VecDeque, hash_map::Entry as MapEntry},
@@ -192,6 +192,7 @@ where
     P: Fn() -> M + Send + 'static,
 {
     type Message = HostEnvelope<K, M>;
+    type Timers = Untimed;
     type State = State<K, M>;
     type Error = Infallible;
 
@@ -318,14 +319,15 @@ impl<M> Entry<M> {
 }
 
 /// Stops itself once its timeout has elapsed, so its watching host is woken by the terminated
-/// signal: without a scheduler that is the only wake-up a host can get, its own message type
-/// being reserved for its entities.
+/// signal: the host cannot wake itself with a timer, since its own message type is reserved for its
+/// entities.
 struct Ticker {
     idle_timeout: Duration,
 }
 
 impl Actor for Ticker {
     type Message = Tick;
+    type Timers = Untimed;
     type State = AbortSleeping;
     type Error = Infallible;
 

@@ -87,8 +87,8 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        ActorContext, EventSourced, Incoming, Nothing, PersistenceId, SchemaVersion, Versioned,
-        persistence::effect::Effect,
+        ActorContext, EventSourced, Incoming, Nothing, PersistenceId, SchemaVersion, Untimed,
+        Versioned, persistence::effect::Effect,
     };
     use serde::{Deserialize, Serialize};
     use std::convert::Infallible;
@@ -106,6 +106,7 @@ mod tests {
 
     impl EventSourced for Counter {
         type Command = ();
+        type Timers = Untimed;
         type Event = Increased;
         type State = ();
         type Snapshot = Nothing;

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, time::Duration};
 use tellus::{
     ActorContext, ActorSystem, Effect, EventSourced, InMemoryStore, Incoming, Persistence,
-    PersistenceId, ReplyTo, SchemaVersion, Versioned,
+    PersistenceId, ReplyTo, SchemaVersion, Untimed, Versioned,
 };
 
 const SNAPSHOT_EVERY: u64 = 3;
@@ -65,6 +65,7 @@ struct Device;
 
 impl EventSourced for Device {
     type Command = Command;
+    type Timers = Untimed;
     type Event = Recorded;
     type State = Readings;
     type Snapshot = Readings;

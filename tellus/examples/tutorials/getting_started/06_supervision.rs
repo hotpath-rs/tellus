@@ -10,7 +10,7 @@ use anyhow::Context;
 use std::{collections::HashMap, convert::Infallible, io, num::NonZeroU32, time::Duration};
 use tellus::{
     Actor, ActorConfig, ActorContext, ActorId, ActorRef, ActorSystem, Control, Incoming, ReplyTo,
-    RestartPolicy, SupervisionStrategy,
+    RestartPolicy, SupervisionStrategy, Untimed,
 };
 use thiserror::Error;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -80,6 +80,7 @@ struct Group;
 
 impl Actor for Group {
     type Message = GroupMessage;
+    type Timers = Untimed;
     type State = HashMap<&'static str, ActorRef<DeviceMessage>>;
     type Error = Infallible;
 
@@ -153,6 +154,7 @@ struct Query;
 
 impl Actor for Query {
     type Message = QueryMessage;
+    type Timers = Untimed;
     type State = QueryState;
     type Error = Infallible;
 
@@ -267,6 +269,7 @@ struct Device;
 // ANCHOR: device
 impl Actor for Device {
     type Message = DeviceMessage;
+    type Timers = Untimed;
     type State = Option<f64>;
     type Error = InvalidReading;
 

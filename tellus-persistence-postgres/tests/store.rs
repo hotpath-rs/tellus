@@ -12,7 +12,7 @@ use std::{
 };
 use tellus::{
     ActorContext, ActorSystem, Effect, EventSourced, Incoming, Nothing, Persistence, PersistenceId,
-    ReplyTo, SchemaVersion, Versioned,
+    ReplyTo, SchemaVersion, Untimed, Versioned,
 };
 use tellus_persistence_postgres::PostgresStore;
 use testcontainers_modules::{
@@ -105,6 +105,7 @@ struct Counter {
 
 impl EventSourced for Counter {
     type Command = Command;
+    type Timers = Untimed;
     type Event = Increased;
     type State = u64;
     type Snapshot = Nothing;

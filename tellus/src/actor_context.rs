@@ -4,6 +4,7 @@ use crate::{
     Actor, ActorConfig, ActorId, ActorRef, Control, Incoming, SupervisionStrategy,
     actor_ref::{SelfRef, Sink},
     mailbox::Mailbox,
+    timers::{Delivery, Sealed, TIMER_FAILED_TO_DROP, Timed, TimerMode, Token, Untimed},
     watch::WatcherRegistry,
 };
 use derive_more::Debug;
@@ -24,15 +25,20 @@ use tokio::{
     select,
     sync::watch,
     task::{self, consume_budget},
-    time::{Instant, sleep},
+    time::{Instant, Sleep, sleep},
 };
 use tracing::{debug, error};
 
 pub(crate) const STATE_FAILED_TO_DROP: &str = "actor state failed to drop";
 
-/// Contextual methods for a given actor, provided to [Actor::init] and [Actor::receive].
+/// Contextual methods for a given actor, provided to [Actor::init] and [Actor::receive]. `T` is the
+/// actor's [TimerMode]: only a [Timed] context has [start_timer](ActorContext::start_timer) and
+/// [cancel_timer](ActorContext::cancel_timer).
 #[derive(Debug)]
-pub struct ActorContext<M> {
+pub struct ActorContext<M, T = Untimed>
+where
+    T: TimerMode,
+{
     self_ref: SelfRef<M>,
 
     #[debug(skip)]
@@ -43,9 +49,15 @@ pub struct ActorContext<M> {
 
     #[debug(skip)]
     watched: RefCell<HashMap<ActorId, Watched>>,
+
+    #[debug(skip)]
+    timers: T::Table<M>,
 }
 
-impl<M> ActorContext<M> {
+impl<M, T> ActorContext<M, T>
+where
+    T: TimerMode,
+{
     /// The reference for the actor itself.
     pub fn self_ref(&self) -> &ActorRef<M> {
         self.self_ref.actor_ref()
@@ -159,7 +171,8 @@ impl<M> ActorContext<M> {
     /// which it has not received yet. For the actor itself the value is a lower bound: only the
     /// actor removes items and senders can only add to them, so at least this many are waiting.
     /// The run loop drops the terminated signals of unwatched actors before [Actor::receive] sees
-    /// them, so the count can exceed what `receive` will get by that many.
+    /// them, so the count can exceed what `receive` will get by that many. Due timers are not
+    /// items, so they are not counted.
     ///
     /// This is for an actor's own behavior, e.g. flushing a batch once its mailbox has run empty
     /// or shedding load above a threshold, as part of its protocol. It is no substitute for flow
@@ -183,6 +196,7 @@ impl<M> ActorContext<M> {
             stop_children_tx,
             stop_children_rx,
             watched: RefCell::new(HashMap::new()),
+            timers: Default::default(),
         }
     }
 
@@ -204,6 +218,92 @@ impl<M> ActorContext<M> {
 
     fn take_watched(&mut self) -> HashMap<ActorId, Watched> {
         mem::take(self.watched.get_mut())
+    }
+}
+
+impl<M> ActorContext<M, Timed> {
+    /// Start a timer: once the delay has elapsed, the message is delivered to this actor like an
+    /// [ActorRef::tell] to itself, behind the items queued for it at that moment. Hence a message
+    /// which arrived before the deadline is received before the timer's message. Unlike a told
+    /// message, a due timer takes no place in a bounded mailbox and is not counted by
+    /// [ActorContext::queued].
+    ///
+    /// Starting a timer under a key which is in use replaces that timer. A timer which has been
+    /// replaced, or canceled via [ActorContext::cancel_timer], is never received, even if it is
+    /// due already. A restart of this actor cancels all its timers, and termination drops them.
+    ///
+    /// A delay the clock cannot represent, e.g. `Duration::MAX`, is capped at about thirty years,
+    /// as `tokio::time::sleep` does. The run loop takes a due timer between two items, so a
+    /// deadline which passes during a long [Actor::receive] places the timer behind the items
+    /// queued once `receive` has returned.
+    ///
+    /// Timers need Tokio's time driver. On a runtime built without it, this panics, so the actor
+    /// fails under its supervision as for any other panic in its own code. An [Untimed] actor has
+    /// no such requirement.
+    pub fn start_timer(&self, key: &'static str, message: M, delay: Duration) {
+        let replaced = self
+            .timers
+            .borrow_mut()
+            .start(key, message, delay, Instant::now());
+        drop_containing_panic(self.self_ref().actor_id(), TIMER_FAILED_TO_DROP, replaced);
+    }
+
+    /// Cancel the timer under this key: its message is dropped and never received, even if the
+    /// timer is due already. Canceling a key which is unknown, or whose timer has been received
+    /// already, has no effect.
+    pub fn cancel_timer(&self, key: &'static str) {
+        let canceled = self.timers.borrow_mut().cancel(key);
+        drop_containing_panic(self.self_ref().actor_id(), TIMER_FAILED_TO_DROP, canceled);
+    }
+
+    pub(crate) fn timer_armed(&mut self) -> bool {
+        self.timers.get_mut().armed()
+    }
+
+    pub(crate) fn timer_deliverable(&mut self) -> bool {
+        self.timers.get_mut().deliverable()
+    }
+
+    pub(crate) fn timer_sleep(&mut self) -> Option<Pin<&mut Sleep>> {
+        self.timers.get_mut().sleep()
+    }
+
+    pub(crate) fn fire_due_timers(&mut self) {
+        let self_ref = &self.self_ref;
+        self.timers
+            .get_mut()
+            .fire_due_timers(Instant::now, || self_ref.actor_ref().queued());
+    }
+
+    pub(crate) fn take_due_timer(&mut self) -> Option<M> {
+        match self.timers.get_mut().take_deliverable()? {
+            Delivery::Message(message) => Some(message),
+
+            Delivery::Stale(id) => {
+                debug!(
+                    actor_id = %self.self_ref().actor_id(),
+                    generation = id.generation(),
+                    "dropping stale timer"
+                );
+
+                None
+            }
+        }
+    }
+
+    pub(crate) fn count_received(&mut self) {
+        self.timers.get_mut().count_received();
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn pending_timers(&self) -> Vec<(&'static str, Instant)> {
+        self.timers.borrow().pending()
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn fire_timer(&self, key: &'static str) -> bool {
+        let queued = self.queued();
+        self.timers.borrow_mut().fire(key, queued)
     }
 }
 
@@ -266,8 +366,146 @@ macro_rules! next_incoming {
     };
 }
 
+macro_rules! next_incoming_timed {
+    ($actor_id:expr, $mailbox:expr, $context:expr, $stopped_by_parent:expr) => {
+        'next_incoming: loop {
+            // Flume's receive future does not participate in Tokio's cooperative budget. Charge
+            // one unit explicitly, so an actor whose mailbox never runs empty still yields to the
+            // other tasks on its worker.
+            consume_budget().await;
+
+            let armed = $context.timer_armed();
+            let deliverable = $context.timer_deliverable();
+
+            let incoming = tokio::select! {
+                biased;
+
+                _ = &mut $stopped_by_parent => {
+                    tracing::debug!(
+                        actor_id = %$actor_id,
+                        "stopping, because parent stopped this actor"
+                    );
+                    break 'next_incoming None;
+                }
+
+                // Before the mailbox, else a mailbox which never runs empty starves a due timer.
+                _ = async {
+                    $context
+                        .timer_sleep()
+                        .expect("an armed timer has its sleep")
+                        .await
+                }, if armed => {
+                    $context.fire_due_timers();
+                    continue 'next_incoming;
+                }
+
+                // Before the mailbox, else a timer would land behind items queued after it.
+                _ = std::future::ready(()), if deliverable => {
+                    match $context.take_due_timer() {
+                        Some(message) => {
+                            break 'next_incoming Some(crate::Incoming::Message(message));
+                        }
+
+                        None => continue 'next_incoming,
+                    }
+                }
+
+                incoming = $mailbox.recv() => {
+                    $context.count_received();
+                    incoming.expect("self_ref keeps a mailbox handle alive")
+                }
+            };
+
+            if let crate::Incoming::Terminated(other) = &incoming
+                && !$context.take_watched_for(*other)
+            {
+                tracing::debug!(
+                    actor_id = %$actor_id,
+                    other_id = %*other,
+                    "dropping terminated signal for an unwatched actor"
+                );
+                continue 'next_incoming;
+            }
+
+            break 'next_incoming Some(incoming);
+        }
+    };
+}
+
 #[cfg(feature = "persistence")]
 pub(crate) use next_incoming;
+#[cfg(feature = "persistence")]
+pub(crate) use next_incoming_timed;
+
+/// The task future of a run loop, expanded once per [TimerMode] with its wait macro, so the
+/// untimed loop is exactly the loop without timers.
+macro_rules! run_actor {
+    (
+        $next_incoming:ident,
+        $actor_id:ident,
+        $self_ref:ident,
+        $mailbox:ident,
+        $actor:ident,
+        $config:ident,
+        $stopped_by_parent_rx:ident
+    ) => {
+        task::spawn(async move {
+            let mut context = ActorContext::new($self_ref);
+
+            let mut rx = $stopped_by_parent_rx.clone();
+            let mut stopped_by_parent = pin!(rx.changed());
+
+            let mut restarts = 0;
+
+            'run: loop {
+                let state = catch_and_log($actor_id, "actor failed to initialize", || {
+                    $actor.init(&context)
+                });
+                let mut up_since = None;
+
+                if let Some(mut state) = state {
+                    up_since = Some(Instant::now());
+
+                    loop {
+                        let incoming =
+                            $next_incoming!($actor_id, $mailbox, context, stopped_by_parent);
+                        let Some(incoming) = incoming else {
+                            drop_containing_panic($actor_id, STATE_FAILED_TO_DROP, state);
+                            break 'run;
+                        };
+
+                        match receive_incoming($actor_id, &$actor, &context, incoming, state) {
+                            Some(Control::Continue(next_state)) => state = next_state,
+
+                            Some(Control::Stop) => {
+                                debug!(actor_id = %$actor_id, "stopping as decided by actor");
+                                break 'run;
+                            }
+
+                            None => break,
+                        }
+                    }
+                }
+
+                let restart = should_restart(
+                    $actor_id,
+                    $config.supervision_strategy,
+                    up_since,
+                    &mut restarts,
+                    &$stopped_by_parent_rx,
+                    &mut stopped_by_parent,
+                    &mut context,
+                )
+                .await;
+                if !restart {
+                    break;
+                }
+            }
+
+            terminate($actor, context, $mailbox).await;
+        })
+    };
+}
 
 pub(crate) fn spawn<A>(
     stopped_by_parent_rx: watch::Receiver<()>,
@@ -279,64 +517,59 @@ where
     A::Message: Send + 'static,
     A::State: Send + 'static,
 {
+    <A::Timers as Sealed>::spawn(Token(()), stopped_by_parent_rx, actor, config)
+}
+
+pub(crate) fn spawn_untimed<A>(
+    stopped_by_parent_rx: watch::Receiver<()>,
+    actor: A,
+    config: ActorConfig,
+) -> ActorRef<A::Message>
+where
+    A: Actor<Timers = Untimed> + Send + 'static,
+    A::Message: Send + 'static,
+    A::State: Send + 'static,
+{
     let actor_id = ActorId::new();
     let (self_ref, mut mailbox) = SelfRef::new(actor_id, config.mailbox_capacity);
     let actor_ref = self_ref.actor_ref().clone();
 
-    task::spawn(async move {
-        let mut context = ActorContext::new(self_ref);
+    run_actor!(
+        next_incoming,
+        actor_id,
+        self_ref,
+        mailbox,
+        actor,
+        config,
+        stopped_by_parent_rx
+    );
 
-        let mut rx = stopped_by_parent_rx.clone();
-        let mut stopped_by_parent = pin!(rx.changed());
+    actor_ref
+}
 
-        let mut restarts = 0;
+pub(crate) fn spawn_timed<A>(
+    stopped_by_parent_rx: watch::Receiver<()>,
+    actor: A,
+    config: ActorConfig,
+) -> ActorRef<A::Message>
+where
+    A: Actor<Timers = Timed> + Send + 'static,
+    A::Message: Send + 'static,
+    A::State: Send + 'static,
+{
+    let actor_id = ActorId::new();
+    let (self_ref, mut mailbox) = SelfRef::new(actor_id, config.mailbox_capacity);
+    let actor_ref = self_ref.actor_ref().clone();
 
-        'run: loop {
-            let state = catch_and_log(actor_id, "actor failed to initialize", || {
-                actor.init(&context)
-            });
-            let mut up_since = None;
-
-            if let Some(mut state) = state {
-                up_since = Some(Instant::now());
-
-                loop {
-                    let incoming = next_incoming!(actor_id, mailbox, context, stopped_by_parent);
-                    let Some(incoming) = incoming else {
-                        drop_containing_panic(actor_id, STATE_FAILED_TO_DROP, state);
-                        break 'run;
-                    };
-
-                    match receive_incoming(actor_id, &actor, &context, incoming, state) {
-                        Some(Control::Continue(next_state)) => state = next_state,
-
-                        Some(Control::Stop) => {
-                            debug!(%actor_id, "stopping as decided by actor");
-                            break 'run;
-                        }
-
-                        None => break,
-                    }
-                }
-            }
-
-            let restart = should_restart(
-                actor_id,
-                config.supervision_strategy,
-                up_since,
-                &mut restarts,
-                &stopped_by_parent_rx,
-                &mut stopped_by_parent,
-                &mut context,
-            )
-            .await;
-            if !restart {
-                break;
-            }
-        }
-
-        terminate(actor, context, mailbox).await;
-    });
+    run_actor!(
+        next_incoming_timed,
+        actor_id,
+        self_ref,
+        mailbox,
+        actor,
+        config,
+        stopped_by_parent_rx
+    );
 
     actor_ref
 }
@@ -434,17 +667,18 @@ pub(crate) fn drop_containing_panic<T>(actor_id: ActorId, failure: &str, value: 
     }
 }
 
-pub(crate) async fn should_restart<F, M>(
+pub(crate) async fn should_restart<F, M, T>(
     actor_id: ActorId,
     supervision_strategy: SupervisionStrategy,
     up_since: Option<Instant>,
     restarts: &mut u32,
     stopped_by_parent_rx: &watch::Receiver<()>,
     stopped_by_parent: &mut Pin<&mut F>,
-    context: &mut ActorContext<M>,
+    context: &mut ActorContext<M, T>,
 ) -> bool
 where
     F: Future,
+    T: TimerMode,
 {
     let delay = match next_restart(supervision_strategy, up_since, restarts) {
         Restart::After(delay) => delay,
@@ -463,6 +697,7 @@ where
     }
     debug!(%actor_id, restarts = *restarts, ?delay, "restarting");
 
+    T::drop_timer_messages(Token(()), actor_id, &mut context.timers);
     context.stop_children().await;
 
     match await_backoff(delay, stopped_by_parent.as_mut()).await {
@@ -479,10 +714,17 @@ where
 /// the channel is dropped before their destructors run: senders observe the termination while the
 /// children still stop, and none of these destructors runs between drain and drop. A concurrent
 /// sender can still enqueue in that window; flume retains such a message until its last sender
-/// drops, which this sequence does not prevent. The watchers are signaled last, since a terminated
-/// signal must prove that the actor's destructors have run.
+/// drops, which this sequence does not prevent. The messages of the timers are dropped right after
+/// the queued ones. The watchers are signaled last, since a terminated signal must prove that the
+/// actor's destructors have run.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub(crate) async fn terminate<A, M>(actor: A, mut context: ActorContext<M>, mailbox: Mailbox<M>) {
+pub(crate) async fn terminate<A, M, T>(
+    actor: A,
+    mut context: ActorContext<M, T>,
+    mailbox: Mailbox<M>,
+) where
+    T: TimerMode,
+{
     let actor_id = context.self_ref().actor_id();
 
     let (incoming_rx, watcher_registration) = mailbox.split();
@@ -491,6 +733,8 @@ pub(crate) async fn terminate<A, M>(actor: A, mut context: ActorContext<M>, mail
     for incoming in drained {
         drop_containing_panic(actor_id, "queued message failed to drop", incoming);
     }
+
+    T::drop_timer_messages(Token(()), actor_id, &mut context.timers);
 
     for (other_id, watched) in context.take_watched() {
         unwatch(actor_id, other_id, watched);
@@ -550,7 +794,7 @@ fn unwatch(watcher_id: ActorId, other_id: ActorId, watched: Watched) {
 fn receive_incoming<A>(
     actor_id: ActorId,
     actor: &A,
-    context: &ActorContext<A::Message>,
+    context: &ActorContext<A::Message, A::Timers>,
     incoming: Incoming<A::Message>,
     state: A::State,
 ) -> Option<Control<A::State>>
@@ -598,15 +842,30 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        Backoff, RestartPolicy, SupervisionStrategy,
-        actor_context::{Interrupted, PanicPayload, Restart, await_backoff, next_restart},
+        ActorContext, ActorId, Backoff, RestartPolicy, SupervisionStrategy, Untimed,
+        actor_context::{Interrupted, PanicPayload, Restart, Watched, await_backoff, next_restart},
+        actor_ref::SelfRef,
     };
-    use std::{future, num::NonZeroU32, pin::pin, time::Duration};
-    use tokio::time::Instant;
+    use std::{
+        cell::RefCell, collections::HashMap, future, num::NonZeroU32, pin::pin, time::Duration,
+    };
+    use tokio::{sync::watch, time::Instant};
 
     const MIN: Duration = Duration::from_millis(250);
     const MAX: Duration = Duration::from_secs(1);
     const NO_RESET: Duration = Duration::from_secs(3600);
+
+    /// The untimed mode adds no bytes to the context: its timer table is `()`.
+    #[test]
+    fn an_untimed_context_has_no_timer_state() {
+        assert_eq!(
+            size_of::<ActorContext<u32, Untimed>>(),
+            size_of::<SelfRef<u32>>()
+                + size_of::<watch::Sender<()>>()
+                + size_of::<watch::Receiver<()>>()
+                + size_of::<RefCell<HashMap<ActorId, Watched>>>()
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_backoff_elapses_uninterrupted() {

@@ -38,7 +38,7 @@ use std::{
     time::Duration,
 };
 use tellus::{
-    Actor, ActorContext, ActorRef, ActorSystem, Control, Incoming,
+    Actor, ActorContext, ActorRef, ActorSystem, Control, Incoming, Untimed,
     cluster::{self, EndpointConfig, Key, Manifest, receptionist, transport::QuicTransport},
 };
 use tokio::{
@@ -100,6 +100,7 @@ struct WorkerPool;
 
 impl Actor for WorkerPool {
     type Message = Work;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -147,6 +148,7 @@ struct Worker;
 
 impl Actor for Worker {
     type Message = Compute;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -205,6 +207,7 @@ struct Gatherer {
 
 impl Actor for Gatherer {
     type Message = Partial;
+    type Timers = Untimed;
     type State = Gathering;
     type Error = Infallible;
 

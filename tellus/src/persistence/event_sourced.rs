@@ -1,5 +1,5 @@
 use crate::{
-    ActorContext, Incoming,
+    ActorContext, Incoming, TimerMode,
     persistence::{effect::Effect, persistence_id::PersistenceId, versioned::Versioned},
 };
 use std::error::Error;
@@ -18,6 +18,10 @@ where
 {
     /// The type of the received commands.
     type Command;
+
+    /// Whether this actor uses timers: [Untimed](crate::Untimed), for an actor without timers, or
+    /// [Timed](crate::Timed), which provides `start_timer` and `cancel_timer` on the context.
+    type Timers: TimerMode;
 
     /// The type of the persisted events.
     type Event: Versioned;
@@ -67,7 +71,7 @@ where
     /// [SupervisionStrategy](crate::SupervisionStrategy).
     fn recovered(
         &self,
-        _context: &ActorContext<Self::Command>,
+        _context: &ActorContext<Self::Command, Self::Timers>,
         state: Self::State,
     ) -> Result<Self::State, Self::Error> {
         Ok(state)
@@ -89,7 +93,7 @@ where
     /// [SupervisionStrategy](crate::SupervisionStrategy).
     fn handle(
         &self,
-        context: &ActorContext<Self::Command>,
+        context: &ActorContext<Self::Command, Self::Timers>,
         incoming: Incoming<Self::Command>,
         state: &Self::State,
     ) -> Result<Effect<Self>, Self::Error>;

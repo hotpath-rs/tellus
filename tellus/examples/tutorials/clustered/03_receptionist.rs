@@ -18,7 +18,7 @@ use std::{
 };
 use tellus::{
     Actor, ActorConfig, ActorContext, ActorId, ActorRef, ActorSystem, Control, Incoming, ReplyTo,
-    RestartPolicy, SupervisionStrategy,
+    RestartPolicy, SupervisionStrategy, Untimed,
     cluster::{
         self, BootstrapConfig, EndpointConfig, FixedSeeds, Key, Manifest, receptionist,
         transport::QuicTransport,
@@ -192,6 +192,7 @@ struct DeviceManager;
 
 impl Actor for DeviceManager {
     type Message = Command;
+    type Timers = Untimed;
     type State = HashMap<String, ActorRef<GroupMessage>>;
     type Error = Infallible;
 
@@ -279,6 +280,7 @@ struct Group;
 
 impl Actor for Group {
     type Message = GroupMessage;
+    type Timers = Untimed;
     type State = HashMap<String, ActorRef<DeviceMessage>>;
     type Error = Infallible;
 
@@ -345,6 +347,7 @@ struct Query;
 
 impl Actor for Query {
     type Message = QueryMessage;
+    type Timers = Untimed;
     type State = QueryState;
     type Error = Infallible;
 
@@ -458,6 +461,7 @@ struct Device;
 
 impl Actor for Device {
     type Message = DeviceMessage;
+    type Timers = Untimed;
     type State = Option<f64>;
     type Error = InvalidReading;
 

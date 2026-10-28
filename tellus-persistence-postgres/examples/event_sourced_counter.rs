@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use std::{convert::Infallible, env, time::Duration};
 use tellus::{
     ActorContext, ActorSystem, Effect, EventSourced, Incoming, Nothing, Persistence, PersistenceId,
-    ReplyTo, SchemaVersion, Versioned,
+    ReplyTo, SchemaVersion, Untimed, Versioned,
 };
 use tellus_persistence_postgres::PostgresStore;
 
@@ -43,6 +43,7 @@ struct Counter;
 
 impl EventSourced for Counter {
     type Command = Command;
+    type Timers = Untimed;
     type Event = Increased;
     type State = u64;
     type Snapshot = Nothing;

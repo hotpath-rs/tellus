@@ -4,7 +4,7 @@
 use anyhow::Context;
 use config::{Config, File, FileFormat};
 use std::convert::Infallible;
-use tellus::{Actor, ActorConfig, ActorContext, ActorSystem, Control, Incoming};
+use tellus::{Actor, ActorConfig, ActorContext, ActorSystem, Control, Incoming, Untimed};
 
 const CONFIG_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/how_to/device.toml");
 
@@ -50,6 +50,7 @@ struct Device;
 
 impl Actor for Device {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 

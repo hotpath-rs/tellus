@@ -42,6 +42,7 @@ system.terminated().await?;
 ```rust
 impl Actor for Greeter {
     type Message = Greet;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -73,6 +74,8 @@ The [`Actor`](../tellus/src/actor.rs) trait separates the actor value from its s
 
 - `Message` is the type of the received messages; actors which react to nothing use the
   uninhabited `Nothing`.
+- `Timers` is the actor's timer mode, `Untimed` or `Timed` (see timers below); only a timed
+  actor's context has `start_timer`.
 - `State` is rebuilt on every restart, while the actor value itself survives; stateless actors use
   `()`.
 - `Error` is the failure type of `init` and `receive`; infallible actors use `Infallible`.
@@ -206,6 +209,75 @@ Polls of the future and the conversion run under `catch_unwind`, the shared
 delivered. A panic must not vanish silently with a discarded `JoinHandle`, else the actor would
 wait for an output which never comes.
 
+## Timers
+
+Timers are opt-in per actor type: `type Timers = Timed;` in an `impl Actor` or `impl EventSourced`
+gives the actor's `ActorContext<M, Timed>` the two methods below. With `Untimed`, the default of
+`ActorContext<M>`, they do not exist, so an actor which has not declared timers cannot start one,
+and it runs the loop without timers (see the run loop below). The two modes are the only
+implementors of the sealed [`TimerMode`](../tellus/src/timers.rs). A function shared by timed and
+untimed actors takes `&ActorContext<M, T>` with `T: TimerMode`; `&ActorContext<M>` is the untimed
+context only.
+
+[`ActorContext::start_timer`](../tellus/src/actor_context.rs) is how a timed actor messages itself
+after a delay, e.g. for a deadline, a retry or an idle timeout: `start_timer(key, message, delay)`
+delivers the message once the delay has elapsed. The key, a `&'static str`, names the timer:
+starting a timer under a key in use replaces that timer, and `cancel_timer(key)` cancels the timer
+under the key. The message of a replaced or canceled timer is dropped at once, under
+`drop_containing_panic`, so a panicking destructor is logged and the actor continues.
+
+The timer's message is delivered like a tell to itself, behind the items queued for the actor when
+the timer is due, so a message which arrived before the deadline is handled before it. Unlike a
+tell, a due timer takes no place in the mailbox ([`mailbox.rs`](../tellus/src/mailbox.rs)): it
+does not count against the capacity of a bounded mailbox, so an actor never loses its own deadline,
+and `queued` does not count it.
+
+The run loop owns the timers: the timer table keeps one Tokio sleep, which the run loop polls.
+Starting a timer moves the sleep only when the new deadline is earlier, so an idle timeout restarted
+on every message costs no reset. Canceling a timer leaves the sleep alone, unless no timer remains,
+which drops it. When the sleep elapses, the run loop fires every due timer: it records the timer's
+position, the number of items received so far plus the number queued in the mailbox at that moment.
+It reads the clock before the mailbox's length, so a timer whose deadline passes in between is left
+for the next firing, behind any message queued meanwhile. It then sets the sleep to the next pending
+deadline, or drops it once no timer is pending. Nothing is spawned per timer, and nothing enters the
+mailbox. The run loop does so only between two items. A deadline which passes during a long
+`receive`, or during the settlement of an event-sourced actor, hence fires once that has finished,
+behind any message which arrived meanwhile.
+
+A fired timer waits in the actor's timer table ([`timers.rs`](../tellus/src/timers.rs)) with its
+message, and the table counts the items the run loop receives. Once that count reaches a fired
+timer's position, the run loop takes the timer instead of the next item, so the timer lands right
+behind the items which were queued when it fired. Those items are still there, since only the run
+loop removes items, and positions never decrease, so fired timers are taken in the order they
+fired. Every `start_timer` draws a new generation from a counter which only goes up. When the run
+loop takes a fired timer, it looks up the timer's slot: if it still holds the timer of that
+generation, the timer's message is passed to `receive`; otherwise the timer has been canceled or
+replaced since, and it is dropped. A canceled or replaced timer is hence never received, even when
+it was due already. The run loop takes one fired timer per iteration, received or dropped, so
+skipping many stale timers still charges the cooperative budget and checks the stop signal between
+them.
+
+Which loop an actor runs is decided by its `Timers` type before its task is spawned
+([`actor_context.rs`](../tellus/src/actor_context.rs)): an `Untimed` actor runs the loop without
+timers, which neither polls a sleep nor counts items, and a `Timed` one the loop which does both
+from its first iteration. Neither loop checks the mode. A `Timed` actor which has no timer pending
+still pays for the timed loop.
+
+A restart cancels all timers, fired ones included, since a timer encodes a deadline of the old
+state; termination drops them, right after the messages drained from the mailbox (see stopping and
+termination below). Either way their messages are dropped under `drop_containing_panic`, so a
+panicking destructor is logged and contained.
+
+Timers need Tokio's time driver. `start_timer` creates the sleep, so on a runtime built without the
+driver it panics in the actor's own code, and the actor fails under its supervision as for any
+other panic there. An `Untimed` actor needs no time driver.
+
+In a unit test no timer fires by itself (see testing below): `TestContext::timed` creates the
+context of a timed actor, [`TestContext::timers`](../tellus/src/testing.rs) lists the pending timers
+with the time remaining, and `TestContext::fire_timer` fires one as the run loop would, whatever its
+delay. `take_incoming` then returns its message behind the items which were queued when it fired,
+unless the actor cancels or replaces the timer first.
+
 ## Mailboxes
 
 A mailbox ([`mailbox.rs`](../tellus/src/mailbox.rs)) is a FIFO channel of `Incoming<M>` split
@@ -221,15 +293,15 @@ same FIFO channel (preserving order behind queued messages) but bypasses the cap
 a terminated signal must never be dropped.
 
 An actor reads its own mailbox depth through `ActorContext::queued`: the number of items not
-received yet, terminated signals included. An actor which writes to a database or a socket can
-flush once its mailbox has run empty, and one which is overloaded can shed load, both as part of
-its own protocol. For the actor itself the value is a lower bound, since only the actor removes
-items; and because the run loop drops the terminated signals of unwatched actors before `receive`
-sees them, the count can exceed what `receive` will get by that many. `queued` takes the channel's
-length under its lock, which every send and receive takes as well, so nothing is paid until it is
-called. The depth is deliberately not on `ActorRef`: for a remote reference it would need a round
-trip, so other actors ask through the actor's protocol. Nor is it flow control, since senders do
-not see it; for that, bound the mailbox.
+received yet, terminated signals included. Due timers are not items, so they are not counted (see
+timers above). An actor which writes to a database or a socket can flush once its mailbox has run
+empty, and one which is overloaded can shed load, both as part of its own protocol. For the actor
+itself the value is a lower bound, since only the actor removes items. The run loop drops the
+terminated signals of unwatched actors before `receive` sees them, so the count can exceed what
+`receive` will get by that many. `queued` takes the channel's length under its lock, which every
+send and receive takes as well, so nothing is paid until it is called. The depth is deliberately not
+on `ActorRef`: for a remote reference it would need a round trip, so other actors ask through the
+actor's protocol. Nor is it flow control, since senders do not see it; for that, bound the mailbox.
 
 The mailbox also owns watcher registration ([`watch.rs`](../tellus/src/watch.rs)): watchers are
 collected in a map keyed by watcher ID which termination takes and closes atomically, so a watcher
@@ -242,15 +314,18 @@ never accumulate.
 ## The run loop
 
 `spawn` in [`actor_context.rs`](../tellus/src/actor_context.rs), reached via
-`ActorContext::spawn_with_config` and by `spawn_root`, spawns one Tokio task per actor;
-event-sourced actors enter the same loop through
+`ActorContext::spawn_with_config` and by `spawn_root`, spawns one Tokio task per actor, with one of
+two task futures chosen by the actor's `Timers` type (see timers above); event-sourced actors enter
+the same loops through
 [`persistence/spawn.rs`](../tellus/src/persistence/spawn.rs), described in
 [persistence.md](persistence.md):
 
 1. Run `init`; a failure is fed to supervision just like a failure of `receive`, so under
    `Restart` even the first initialization is retried.
-2. Loop: wait (biased) for either the parent's stop signal or the next incoming from the mailbox,
-   and pass the incoming to `receive`.
+2. Loop: wait (biased) for the parent's stop signal, a due timer, a fired timer whose position has
+   been reached, or the next item from the mailbox. Fire a due timer instead of receiving anything;
+   pass the message of a fired timer, or the item, to `receive`. An `Untimed` actor's loop waits
+   for the stop signal and the mailbox alone.
 3. Map the result to an outcome: `Continue` carries the next state, an error or panic consults the
    `SupervisionStrategy` (`Restart` or `Stop`), `Control::Stop` stops.
 4. On stop, run the termination sequence below.
@@ -258,12 +333,13 @@ event-sourced actors enter the same loop through
 Both `init` and `receive` run under `catch_unwind`, so a panic is handled exactly like a returned
 error: logged with the actor ID and fed to supervision. An error is logged with its source as a
 separate field, so a wrapped cause stays queryable instead of being flattened into the message.
-The biased select ensures a stop signal is honored before further queued messages once the parent
-is stopping. Before each wait, the loop consumes one unit of Tokio's cooperative budget
-(`consume_budget`). A mailbox which never runs empty would otherwise keep the actor's task ready
-forever, since flume is not part of that budget: once the budget is used up, the actor yields its
-worker, so other tasks, timers and its own stop signal get to run, also on a current-thread
-runtime.
+The biased select ensures a stop signal is honored before further queued messages once the parent is
+stopping, and a due timer is fired before the next item is taken; for both, one item can go first
+when the cooperative budget runs out. Before each wait, the loop consumes one unit of Tokio's
+cooperative budget (`consume_budget`). A mailbox which never runs empty would otherwise keep the
+actor's task ready forever, since flume is not part of that budget: once the budget is used up, the
+actor yields its worker, so other tasks, timers and its own stop signal get to run, also on a
+current-thread runtime.
 
 ## Stopping and termination
 
@@ -297,8 +373,10 @@ destructors have run.
 The mailbox is drained and disconnected right at the start of the sequence: senders observe the
 termination while the children still stop, and the destructors of the drained messages run as part
 of it, so e.g. a queued request's reply channel resolves its ask as `NoReply` instead of pending
-forever. A send racing with the drain can still slip past it; such a message is retained until its
-last sender is dropped, which is why the `NoReply` detection is best-effort.
+forever. The messages of the actor's timers are dropped right after the drained ones, so a `ReplyTo`
+inside one resolves its ask as `NoReply` too. A send racing with the drain can still slip past it;
+such a message is retained until its last sender is dropped, which is why the `NoReply` detection is
+best-effort.
 
 The root actor has no parent, so `ActorSystem::stop` is that channel from the outside: it sends on
 the very sender which keeps the root alive, shared between the system and the root's watcher
@@ -332,7 +410,8 @@ initialization at spawn, so a failing initializer, e.g. one connecting to a stru
 dependency, is retried with backoff instead of looping hot.
 
 Watches survive a restart: the restarted state can receive terminated signals for actors the
-previous incarnation watched, including its own stopped children if it watched them.
+previous incarnation watched, including its own stopped children if it watched them. Timers do not:
+a restart cancels them (see timers above).
 
 ## Death watch
 
@@ -382,11 +461,20 @@ Passivation is what makes a host more than a map of references: it frees the mem
 nobody talks to. That is safe only where the entity's state is recoverable or disposable, which is
 the case for event sourced entities, whose next incarnation replays what the store holds.
 
-Since `receive` is synchronous and tellus has no scheduler, the host cannot wake itself on a
-timer, and its own message type is reserved for its entities. It therefore spawns a ticker child
-per period, an actor which stops itself once the idle timeout has elapsed: the terminated signal
-of that child is the sweep. The ticker holds its sleeping task in a guard which aborts it when the
-ticker stops, since terminating an actor does not cancel the tasks it spawned.
+Passivation ends an entity's timers with the rest of its state, and they are not restarted
+automatically in the next incarnation. An event sourced entity can record a deadline in its state
+and start the timer again in `recovered`. That restores the timer only once a message has spawned
+the next incarnation; nothing wakes a passivated entity at its deadline, so this is not a durable
+scheduled delivery. An entity can also defer stopping on the passivate message while a deadline is
+pending. From the moment the host sent that message, it buffers the messages routed through it for
+that entity until the entity has stopped (see below). Messages sent to the entity's reference
+directly, and its own timers, still reach the stopping incarnation.
+
+The host cannot wake itself with a timer (see timers above), since its own message type is reserved
+for its entities. It therefore spawns a ticker child per period, an actor which stops itself once
+the idle timeout has elapsed: the terminated signal of that child is the sweep. The ticker holds its
+sleeping task in a guard which aborts it when the ticker stops, since terminating an actor does not
+cancel the tasks it spawned.
 
 A sweep asks every entity idle for at least the timeout to stop, and only an entity whose mailbox
 accepted that message counts as stopping; a full mailbox leaves it live and eligible at the next
@@ -427,9 +515,10 @@ root stops on its own terms.
 
 Every drop path the framework controls runs under `catch_unwind` (`drop_containing_panic` in
 [`actor_context.rs`](../tellus/src/actor_context.rs)): the state dropped when the parent stops the
-actor, and the actor value and the mailbox dropped at termination. A destructor panic is hence
-logged and termination completes, including the signals to the watchers. A destructor panic on a
-normal return of
+actor, the message of a replaced or canceled timer, the timer messages dropped at a restart, and the
+actor value, the mailbox and the timer messages dropped at termination. A destructor panic is hence
+logged, and what the framework was doing carries on: a replace, cancel or restart completes, and so
+does termination, including the signals to the watchers. A destructor panic on a normal return of
 `receive` is equally contained: when `receive` returns an error and the state's destructor panics
 while the frame returns, that panic is caught like any other and fed to supervision. The locks the
 framework holds itself recover from poisoning ([`sync.rs`](../tellus/src/sync.rs)), so a panic
@@ -454,12 +543,13 @@ a `ReplyTo`, can be read back in order with `take_incoming`.
 
 ```rust
 use std::convert::Infallible;
-use tellus::{Actor, ActorContext, Control, Incoming, testing::TestContext};
+use tellus::{Actor, ActorContext, Control, Incoming, Untimed, testing::TestContext};
 
 struct Countdown;
 
 impl Actor for Countdown {
     type Message = u32;
+    type Timers = Untimed;
     type State = u32;
     type Error = Infallible;
 
@@ -498,6 +588,11 @@ Calling an actor directly differs from running it in a few ways:
 
 - The run loop drops a terminated signal whose sender is no longer watched; a direct call to
   `receive` sees every signal it is given.
+- No timer fires by itself; `fire_timer` fires one (see timers above). `take_incoming` drops
+  canceled or replaced timers for everything it returns at once, not item by item between calls to
+  `receive` as the run loop does. A cancel made while handling one item hence cannot drop a timer
+  behind it. To test such a cancel, pass the earlier item to `receive` directly, then call
+  `take_incoming`.
 - Nothing supervises the call: an error or a panic reaches the test, and nothing restarts the
   actor.
 - `spawn` starts a real child actor, hence needs a Tokio runtime, for example `#[tokio::test]`.
@@ -530,6 +625,10 @@ has to wait for the actor, since `tell` returns before the message is handled.
 - Request-response is at-most-once too: `ask` resolves exactly once, with the reply or an error,
   at the latest when its timeout elapses, and never redelivers; a `reply_to` reply is an ordinary
   send, dropped as a dead letter if the asker is gone or its bounded mailbox is full.
+- A canceled or replaced timer is never received, even when it was due already.
+- A message which arrived before a timer's deadline is handled before the timer's message. The run
+  loop fires a due timer between two items, so it can also land behind messages which arrived
+  while the actor was busy, e.g. in a long `receive` or an event-sourced settlement.
 - A host has at most one incarnation of an entity at any time: a replacement is spawned only once
   the previous one's terminated signal has arrived.
 - A message for an entity which is stopping is enqueued to its next incarnation, in order, up to

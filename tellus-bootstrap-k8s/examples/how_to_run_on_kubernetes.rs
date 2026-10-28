@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 use tellus::{
-    Actor, ActorContext, ActorSystem, Control, Incoming,
+    Actor, ActorContext, ActorSystem, Control, Incoming, Untimed,
     cluster::{
         self, BootstrapConfig, EndpointConfig, MemberState,
         transport::{QuicConfig, QuicTransport},
@@ -154,6 +154,7 @@ struct Idle;
 
 impl Actor for Idle {
     type Message = ();
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 

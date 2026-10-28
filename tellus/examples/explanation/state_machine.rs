@@ -3,7 +3,7 @@
 
 use anyhow::Context;
 use std::{convert::Infallible, time::Duration};
-use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming, ReplyTo};
+use tellus::{Actor, ActorContext, ActorSystem, Control, Incoming, ReplyTo, Untimed};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -36,6 +36,7 @@ struct Device;
 
 impl Actor for Device {
     type Message = Message;
+    type Timers = Untimed;
     type State = State;
     type Error = Infallible;
 

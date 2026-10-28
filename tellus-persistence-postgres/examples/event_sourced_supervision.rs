@@ -18,7 +18,7 @@ use std::{convert::Infallible, env, io, num::NonZeroU32, time::Duration};
 use tellus::{
     Actor, ActorConfig, ActorContext, ActorSystem, Backoff, Control, Effect, EventSourced,
     Incoming, Nothing, Persistence, PersistenceId, RestartPolicy, SchemaVersion,
-    SupervisionStrategy, Versioned,
+    SupervisionStrategy, Untimed, Versioned,
 };
 use tellus_persistence_postgres::PostgresStore;
 use thiserror::Error;
@@ -76,6 +76,7 @@ struct Overseer {
 
 impl Actor for Overseer {
     type Message = Nothing;
+    type Timers = Untimed;
     type State = ();
     type Error = Infallible;
 
@@ -111,6 +112,7 @@ struct Loader;
 
 impl EventSourced for Loader {
     type Command = Command;
+    type Timers = Untimed;
     type Event = Loaded;
     type State = u64;
     type Snapshot = Nothing;

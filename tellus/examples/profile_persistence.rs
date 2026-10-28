@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tellus::{
     ActorContext, ActorSystem, Effect, EventSourced, InMemoryStore, Incoming, Persistence,
-    PersistenceId, SchemaVersion, Versioned,
+    PersistenceId, SchemaVersion, Untimed, Versioned,
 };
 
 const EVENTS: u64 = 50_000;
@@ -88,6 +88,7 @@ struct Counter {
 
 impl EventSourced for Counter {
     type Command = Increase;
+    type Timers = Untimed;
     type Event = Increased;
     type State = u64;
     type Snapshot = Count;
