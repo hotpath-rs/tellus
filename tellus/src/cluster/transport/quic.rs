@@ -216,7 +216,7 @@ impl QuicTransport {
             bind_addr.ip().to_string(),
         ])?;
         let cert = certified_key.cert.der().clone();
-        let key = PrivateKeyDer::Pkcs8(certified_key.key_pair.serialize_der().into());
+        let key = PrivateKeyDer::Pkcs8(certified_key.signing_key.serialize_der().into());
         let server_config = ServerConfig::with_single_cert(vec![cert], key)?;
 
         let tls_config = rustls::ClientConfig::builder()
@@ -994,6 +994,7 @@ mod tests {
         let mut ca_params = rcgen::CertificateParams::new(Vec::new()).expect("ca parameters");
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let ca_cert = ca_params.self_signed(&ca_key).expect("ca certificate");
+        let ca = rcgen::Issuer::from_params(&ca_params, &ca_key);
 
         let mut roots = rustls::RootCertStore::empty();
         roots.add(ca_cert.der().clone()).expect("ca root");
@@ -1002,9 +1003,7 @@ mod tests {
             let key = rcgen::KeyPair::generate().expect("node key");
             let params =
                 rcgen::CertificateParams::new(vec!["tellus".to_string()]).expect("node parameters");
-            let cert = params
-                .signed_by(&key, &ca_cert, &ca_key)
-                .expect("node certificate");
+            let cert = params.signed_by(&key, &ca).expect("node certificate");
 
             QuicTransport::mutual_tls(
                 loopback,
@@ -1061,6 +1060,7 @@ mod tests {
         let mut ca_params = rcgen::CertificateParams::new(Vec::new()).expect("ca parameters");
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let ca_cert = ca_params.self_signed(&ca_key).expect("ca certificate");
+        let ca = rcgen::Issuer::from_params(&ca_params, &ca_key);
 
         let roots = dir.join("roots.pem");
         fs::write(&roots, ca_cert.pem()).expect("writes the roots");
@@ -1070,9 +1070,7 @@ mod tests {
                 let key = rcgen::KeyPair::generate().expect("node key");
                 let params = rcgen::CertificateParams::new(vec!["tellus".to_string()])
                     .expect("node parameters");
-                let cert = params
-                    .signed_by(&key, &ca_cert, &ca_key)
-                    .expect("node certificate");
+                let cert = params.signed_by(&key, &ca).expect("node certificate");
 
                 let cert_chain = dir.join(format!("node-{n}-cert.pem"));
                 let key_path = dir.join(format!("node-{n}-key.pem"));

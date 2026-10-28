@@ -16,7 +16,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use configured::{Case, Configured};
+use configured::{Configured, LoadOptions};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -74,7 +74,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let config = Config::load(Case::Snake).context("load configuration")?;
+    let config = Config::load(LoadOptions::default()).context("load configuration")?;
     let addr = config.endpoint.advertised_addr;
     start_endpoint(config.endpoint)?;
 
@@ -685,7 +685,7 @@ fn members() -> Vec<Member> {
 #[cfg(test)]
 mod tests {
     use crate::{Config, Seeds};
-    use configured::{CONFIG_DIR, CONFIG_ENV_PREFIX, CONFIG_OVERLAYS, Case, Configured};
+    use configured::{Configured, LoadOptions};
     use std::{env, net::SocketAddr, num::NonZeroU16};
     use tellus_bootstrap_dns::Query;
     use tellus_bootstrap_k8s::{Pods, Port};
@@ -693,19 +693,20 @@ mod tests {
     /// The shipped configuration must keep deserializing into tellus's own config types; the
     /// per-node overrides are what the compose file and the manifests set, and each overlay must
     /// contribute exactly its own discovery.
-    /// Both overlays are asserted by one test, since the loader reads process-global environment
+    /// Both overlays are asserted by one test, since the overrides are process-global environment
     /// variables which two tests would race on.
     #[test]
     fn the_shipped_config_loads() {
+        let options = LoadOptions::default()
+            .config_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/config"))
+            .config_env_prefix("CFG");
         unsafe {
-            env::set_var(CONFIG_DIR, concat!(env!("CARGO_MANIFEST_DIR"), "/config"));
-            env::remove_var(CONFIG_ENV_PREFIX);
-            env::set_var(CONFIG_OVERLAYS, "dns");
             env::set_var("CFG__NODE_NAME", "node1");
             env::set_var("CFG__ENDPOINT__ADVERTISED_ADDR", "172.28.0.11:7878");
         }
 
-        let config = Config::load(Case::Snake).expect("the dns overlay loads");
+        let config =
+            Config::load(options.clone().config_overlays(["dns"])).expect("the dns overlay loads");
 
         assert_eq!(config.node_name, "node1");
         assert_eq!(
@@ -724,9 +725,8 @@ mod tests {
             }
         );
 
-        unsafe { env::set_var(CONFIG_OVERLAYS, "k8s") };
-
-        let config = Config::load(Case::Snake).expect("the k8s overlay loads");
+        let config =
+            Config::load(options.clone().config_overlays(["k8s"])).expect("the k8s overlay loads");
 
         let Seeds::K8s(pods) = config.seeds else {
             panic!("the k8s overlay yields Kubernetes discovery")
@@ -740,8 +740,6 @@ mod tests {
             }
         );
 
-        unsafe { env::remove_var(CONFIG_OVERLAYS) };
-
-        assert!(Config::load(Case::Snake).is_err());
+        assert!(Config::load(options.config_overlays::<_, &str>([])).is_err());
     }
 }
