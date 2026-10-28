@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/tellus-rs/tellus/compare/tellus-v0.4.0...tellus-v0.5.0) - 2026-10-28
+
+### Added
+
+- add timers, opt-in per actor via Actor::Timers
+- let an actor read its own mailbox depth
+
+### Fixed
+
+- *(cluster)* drain a departure over a connection still being set up
+
+### Other
+
+- add a stale readings tutorial step and a batch writes example
+- *(cluster)* recover from ports taken before a node binds them
+
 ## [0.4.0](https://github.com/tellus-rs/tellus/compare/tellus-v0.3.9...tellus-v0.4.0) - 2026-10-21
 
 ### Added
