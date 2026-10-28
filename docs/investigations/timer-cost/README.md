@@ -14,50 +14,52 @@ at `39aec83`. It may only be merged once actors without timers are no measurably
 every messaging row passes the protocol below. The results are posted on #174; the tracking issue
 #178 is closed in favor of the PR.
 
-A diagnostic with the mailbox item `Queued<M>` and its gate alone reproduces most of the cost.
-That isolates a configuration, not an instruction-level cause. Two designs which keep timer items
-out of the mailbox are built and measured: the depth cursor on `feat/timers-cursor` (`de24ce8`) and
-the same with its timed loop out of line on `exp/timers-cursor-out-of-line` (`7fe7858`). The
-cursor is the working design; the out of line variant is an experiment. Neither passes every row.
-On x86_64 the cursor fails five rows at +3.1 to +3.8%, passes two and leaves three inconclusive. On
-Neoverse-N2 it passes nine rows and leaves `ping_pong/pairs/1` inconclusive. With its timed loop
-removed, the cursor passes those rows. One validated code placement moved no row by more than 2.5%.
-Which part of the timed path costs is not established, see next steps below. The cursor with an
-inlined recv future (`exp/timers-cursor-inline-recv`, `b30e728`) runs the `queued` and `flood` rows
-4 to 7% faster than `main` on both architectures and every timer row 7 to 13% faster than the
-cursor. It fails `fan_out/workers/16` on Neoverse-N2 at +10.7% and leaves four x86_64 rows
-inconclusive. Varying the message count shows that cost to be per message, not per actor, and the
-Xeon 6973P-C shows it as well. Receive counts on the N2 show the variant's `/16` workers waiting for
-a message more often than `main`'s. Producer bursts cut that waiting by two thirds without removing
-the penalty and by a factor of ten with removing it; the variant's excess waiting over `main` stays
-at bursts 1 and 4. Sampling profiles of the plain binaries locate the added CPU in user space fast
-paths: a 32 bit lock compare and swap (+56 to +127 ns per message) and tokio's wake path (+14 to
-+95 ns), against savings in `poll_notified` and flume's send and receive; the mutex slow path and
-the kernel stay small. Call chains attribute the compare and swap to two lock words, the mailbox's
-channel mutex in flume's `send` and `recv` (+16 to +68 ns) and the stop channel's `Notify` mutex in
-`poll_notified` (+35 to +44 ns). The stop channel's path costs the same in both binaries in total;
-the added time is in flume's channel path (+27 to +28 ns at bursts 1 and 4, +2 at burst 16) and in
-the wake and scheduling paths (+9 to +35 ns). The cursor with a single fixed-shape select
-(`exp/timers-cursor-single-select`, `ad83454`), the shape proposed on #174, restores `main`'s
-inlining of the recv future, passes `ping_pong` on the N2 and fails five x86_64 rows at +7.5 to
-+13.6%, with four more inconclusive. `main` plus the inlined recv future alone
-(`exp/inline-recv`, `48ac3d0`) reproduces the N2 `fan_out/workers/16` failure at +9.0% without any
-timer code and is faster than `main` on every other row, so that tradeoff belongs to the receive
-optimization, not to the timers. #174's own candidate (`exp/timers-inline-gate`, `a8ab639`, the
-gate inlined over the `Queued` item, swept by the contributor) fails two x86_64 rows at +5.6 and
-+5.7% with five more borderline. The cursor with the timer poll folded into the mailbox's waiting
-future (`exp/timers-cursor-combined`, `f55717e`) fails eight x86_64 rows at +7.4 to +17.4% and
-`flood/bounded` on the N2 at +5.0%, the worst result of any variant. Every loop variant under the
-universal timer API failed the x86_64 throughput rows, so timers became an opt-in per actor type
-(`feat/timers-opt-in`, swept as `077c74a`): the untimed loop is `main`'s per function on the message
+A diagnostic with the mailbox item `Queued<M>` and its gate alone reproduces most of the cost. That
+isolates a configuration, not an instruction-level cause. Two designs which keep timer items out of
+the mailbox are built and measured: the depth cursor ([`cursor.patch`](patches/cursor.patch), built
+as `de24ce8`) and the same with its timed loop out of line
+([`cursor-out-of-line.patch`](patches/cursor-out-of-line.patch), `7fe7858`). The cursor is the
+working design; the out of line variant is an experiment. Neither passes every row. On x86_64 the
+cursor fails five rows at +3.1 to +3.8%, passes two and leaves three inconclusive. On Neoverse-N2 it
+passes nine rows and leaves `ping_pong/pairs/1` inconclusive. With its timed loop removed, the
+cursor passes those rows. One validated code placement moved no row by more than 2.5%. Which part of
+the timed path costs is not established, see next steps below. The cursor with an inlined recv
+future ([`cursor-inline-recv.patch`](patches/cursor-inline-recv.patch), `b30e728`) runs the `queued`
+and `flood` rows 4 to 7% faster than `main` on both architectures and every timer row 7 to 13%
+faster than the cursor. It fails `fan_out/workers/16` on Neoverse-N2 at +10.7% and leaves four
+x86_64 rows inconclusive. Varying the message count shows that cost to be per message, not per
+actor, and the Xeon 6973P-C shows it as well. Receive counts on the N2 show the variant's `/16`
+workers waiting for a message more often than `main`'s. Producer bursts cut that waiting by two
+thirds without removing the penalty and by a factor of ten with removing it; the variant's excess
+waiting over `main` stays at bursts 1 and 4. Sampling profiles of the plain binaries locate the
+added CPU in user space fast paths: a 32 bit lock compare and swap (+56 to +127 ns per message) and
+tokio's wake path (+14 to +95 ns), against savings in `poll_notified` and flume's send and receive;
+the mutex slow path and the kernel stay small. Call chains attribute the compare and swap to two
+lock words, the mailbox's channel mutex in flume's `send` and `recv` (+16 to +68 ns) and the stop
+channel's `Notify` mutex in `poll_notified` (+35 to +44 ns). The stop channel's path costs the same
+in both binaries in total; the added time is in flume's channel path (+27 to +28 ns at bursts 1 and
+4, +2 at burst 16) and in the wake and scheduling paths (+9 to +35 ns). The cursor with a single
+fixed-shape select ([`cursor-single-select.patch`](patches/cursor-single-select.patch), `ad83454`),
+the shape proposed on #174, restores `main`'s inlining of the recv future, passes `ping_pong` on the
+N2 and fails five x86_64 rows at +7.5 to +13.6%, with four more inconclusive. `main` plus the
+inlined recv future alone ([`inline-recv.patch`](patches/inline-recv.patch), `48ac3d0`) reproduces
+the N2 `fan_out/workers/16` failure at +9.0% without any timer code and is faster than `main` on
+every other row, so that tradeoff belongs to the receive optimization, not to the timers. #174's own
+candidate ([`inline-gate.patch`](patches/inline-gate.patch), `a8ab639`, the gate inlined over the
+`Queued` item, swept by the contributor) fails two x86_64 rows at +5.6 and +5.7% with five more
+borderline. The cursor with the timer poll folded into the mailbox's waiting future
+([`cursor-combined.patch`](patches/cursor-combined.patch), `f55717e`) fails eight x86_64 rows at
++7.4 to +17.4% and `flood/bounded` on the N2 at +5.0%, the worst result of any variant. Every loop
+variant under the universal timer API failed the x86_64 throughput rows, so timers became an opt-in
+per actor type (#185, swept as `077c74a`): the untimed loop is `main`'s per function on the message
 path, and the sweep passes eighteen rows with none failing or borderline; N2 `flood/bounded` is
 inconclusive by too few jobs passing A/A and x86_64 `flood/unbounded` by spread, both with the
 candidate within ±2.3% in every job. That is the first variant without a failing row. A confirmation
 run (40499387401) under a protocol extension recorded before it passes the two rows and leaves
 x86_64 `flood/bounded` undecided by two A/A failures, where the first run passed it, so the
 candidate is accepted under that extension: every row passes in at least one of the two whole
-sweeps, none fails or is borderline in either. PR #185 carries the implementation. Its review
-fix (`1800f0c`) touches only the timed path. Two whole messaging sweeps of it pass every row but N2
+sweeps, none fails or is borderline in either. PR #185 carries the implementation. Its review fix
+(`1800f0c`) touches only the timed path. Two whole messaging sweeps of it pass every row but N2
 `flood/bounded`, which is inconclusive in both by too few jobs passing A/A. The maintainer accepts
 the fix on the messaging bench as an exception, with the reason recorded below. Two whole
 persistence sweeps accept it under the confirmation rule.
@@ -184,13 +186,13 @@ Neoverse-N2 against #174's +7.3 to +8.0%, and +12 to +15% on EPYC 7763 jobs agai
 
 ## The depth cursor
 
-`feat/timers-cursor` (`de24ce8`, one commit on `39aec83`) keeps #174's API, timer table, tests and
-documentation, but a due timer never enters the mailbox. When the sleep elapses, the run loop
-records the timer's position: the number of items received so far plus the mailbox's length. Once
-it has received that many items, it takes the timer instead of the next item, checking the
-generation as #174's gate does, one fired timer per iteration. The channel carries `Incoming<M>` as
-on `main`. An actor without a timer table runs `main`'s loop unchanged; the loop checks
-`has_timers` once per message to switch.
+The cursor ([`cursor.patch`](patches/cursor.patch) on #174's head `283e5e7`, built as `de24ce8`, one
+commit on `39aec83`) keeps #174's API, timer table, tests and documentation, but a due timer never
+enters the mailbox. When the sleep elapses, the run loop records the timer's position: the number of
+items received so far plus the mailbox's length. Once it has received that many items, it takes the
+timer instead of the next item, checking the generation as #174's gate does, one fired timer per
+iteration. The channel carries `Incoming<M>` as on `main`. An actor without a timer table runs
+`main`'s loop unchanged; the loop checks `has_timers` once per message to switch.
 
 The channel functions are structurally identical to `main`'s on aarch64. `just all` and the
 allocation gate pass. All of #174's timer tests pass unchanged, and two tests are new: a timer
@@ -223,9 +225,10 @@ Marking the timed branch with `hint::cold_path` changed six instructions and was
 
 ## The timed loop out of line
 
-`exp/timers-cursor-out-of-line` (`7fe7858`) moves the timed loop into an `async fn`, polled through
-a wrapper whose `poll` is `#[inline(never)]`. The `Countdown` run loop shrinks to 1091 instructions
-on x86_64. Its tests and clippy pass. Run 40211281691:
+The out of line variant ([`cursor-out-of-line.patch`](patches/cursor-out-of-line.patch) on the
+cursor, built as `7fe7858`) moves the timed loop into an `async fn`, polled through a wrapper whose
+`poll` is `#[inline(never)]`. The `Countdown` run loop shrinks to 1091 instructions on x86_64. Its
+tests and clippy pass. Run 40211281691:
 
 | Row | Out of line N2 | Out of line x86 |
 |---|---|---|
@@ -372,13 +375,14 @@ one EPYC 9V45, while the cursor's failures were measured mostly on EPYC 7763.
 
 ## The cursor with an inlined recv future
 
-`exp/timers-cursor-inline-recv` (`b30e728`) is the cursor with one change in `mailbox.rs`.
-`Mailbox::recv` returns a hand-written future `Recv<'_, M>` which wraps flume's `RecvFut` and
-releases the quota for a message in the same `poll` that sees it. Its `poll` is `#[inline(always)]`.
-Cancellation goes through flume's `RecvFut`, as on `main`. With the `hotpath` feature, `recv` stays
-an `async fn` with the measure attribute which awaits that future, so `just profile` reports
-`mailbox::recv` with 110000 calls, as on `main`; a measure on `poll` would count polls instead of
-receives. The bench binary is byte-identical with and without that wrapper.
+The inlined recv variant ([`cursor-inline-recv.patch`](patches/cursor-inline-recv.patch) on the
+cursor, built as `b30e728`) is the cursor with one change in `mailbox.rs`. `Mailbox::recv` returns a
+hand-written future `Recv<'_, M>` which wraps flume's `RecvFut` and releases the quota for a message
+in the same `poll` that sees it. Its `poll` is `#[inline(always)]`. Cancellation goes through
+flume's `RecvFut`, as on `main`. With the `hotpath` feature, `recv` stays an `async fn` with the
+measure attribute which awaits that future, so `just profile` reports `mailbox::recv` with 110000
+calls, as on `main`; a measure on `poll` would count polls instead of receives. The bench binary is
+byte-identical with and without that wrapper.
 
 Generated code, both architectures:
 
@@ -822,17 +826,18 @@ drains its mailbox the first. Neither is tried here.
 
 A measurement posted on #174 (https://github.com/tellus-rs/tellus/pull/174#issuecomment-6418223816)
 proposes a select of fixed shape: a third branch polling a hand-written future whose poll is a null
-check of the boxed table, instead of an `async` block behind an `if armed` precondition.
-`exp/timers-cursor-single-select` (`ad83454`, one commit on `39aec83`) applies that shape to the
-cursor. Both run loops use `main`'s `next_incoming!` macro with one branch added between the stop
-signal and the mailbox: a `poll_fn` over the context. Without a table it returns `Pending` and
-registers no waker; timers change only in the actor's own synchronous callbacks on the same task
-(`init`, `receive`, `recovered`, `handle`), so nothing has to wake the loop for them, and an armed
-sleep registers its own waker. With a table it polls the sleep first and then checks the head of the
-fired timers. One fired timer is taken per iteration, and the channel items are counted before the
-unwatched filter. `has_timers`, the second macro and the switch are gone; `persistence/spawn.rs` is
-`main`'s. Clippy, the timer, test context, persistence and core tests, the `#[ignore]`d fairness
-test (50 of 50) and the allocation gate pass.
+check of the boxed table, instead of an `async` block behind an `if armed` precondition. The single
+select variant ([`cursor-single-select.patch`](patches/cursor-single-select.patch) on the cursor,
+built as `ad83454`, one commit on `39aec83`) applies that shape to the cursor. Both run loops use
+`main`'s `next_incoming!` macro with one branch added between the stop signal and the mailbox: a
+`poll_fn` over the context. Without a table it returns `Pending` and registers no waker; timers
+change only in the actor's own synchronous callbacks on the same task (`init`, `receive`,
+`recovered`, `handle`), so nothing has to wake the loop for them, and an armed sleep registers its
+own waker. With a table it polls the sleep first and then checks the head of the fired timers. One
+fired timer is taken per iteration, and the channel items are counted before the unwatched filter.
+`has_timers`, the second macro and the switch are gone; `persistence/spawn.rs` is `main`'s. Clippy,
+the timer, test context, persistence and core tests, the `#[ignore]`d fairness test (50 of 50) and
+the allocation gate pass.
 
 Generated code against `main`, both architectures, before the sweep:
 
@@ -887,11 +892,11 @@ variant fails the criterion and is not a candidate.
 ## `main` with the inlined recv future
 
 Does the inlined recv future have its `fan_out/workers/16` tradeoff without any timer code?
-`exp/inline-recv` (`48ac3d0`, one commit on `39aec83`) applies `b30e728`'s change to `mailbox.rs`,
-and nothing else, to `main`: `Mailbox::recv` returns the hand-written `Recv` future whose
-`#[inline(always)]` poll wraps flume's `RecvFut` and releases the quota in the same poll. Clippy,
-the test suite, the `hotpath` profile (`mailbox::recv` at 110000 calls, as on `main`) and the
-allocation gate pass.
+[`inline-recv.patch`](patches/inline-recv.patch) (on `39aec83`, built as `48ac3d0`) applies
+`b30e728`'s change to `mailbox.rs`, and nothing else, to `main`: `Mailbox::recv` returns the
+hand-written `Recv` future whose `#[inline(always)]` poll wraps flume's `RecvFut` and releases the
+quota in the same poll. Clippy, the test suite, the `hotpath` profile (`mailbox::recv` at 110000
+calls, as on `main`) and the allocation gate pass.
 
 Generated code against `main`, both architectures, revalidated on this base rather than carried
 over from the cursor:
@@ -940,9 +945,10 @@ x86_64 throughput rows so far.
 
 ## #174's candidate
 
-The contributor built the design proposed on #174 as `exp/timers-inline-gate` (`a8ab639`, one commit
-on `39aec83`): the gate inlined into the run loop as two arms and a fixed-shape select, with the
-`Queued<M>` item kept in the channel. Run 40373337251, swept by the contributor
+The contributor built the design proposed on #174, recorded here as
+[`inline-gate.patch`](patches/inline-gate.patch) (on #174's head `283e5e7`, built as `a8ab639`, one
+commit on `39aec83`): the gate inlined into the run loop as two arms and a fixed-shape select, with
+the `Queued<M>` item kept in the channel. Run 40373337251, swept by the contributor
 (https://github.com/tellus-rs/tellus/pull/174#issuecomment-6424377550): on the Neoverse-N2 eight
 rows pass (-3.3 to +2.8%) and `flood/unbounded` and `flood/bounded` are borderline at +3.2 and
 +4.1%; on x86_64 (two EPYC 9V45, two EPYC 9V74) `queued/never/4` fails at +5.6% and
@@ -954,18 +960,19 @@ configuration which keeps `Queued<M>` in the channel. The candidate does not mee
 
 The single select failed with the timers polled in a third branch. Does one waiting future which
 checks the timers and then polls `main`'s unchanged `Mailbox::recv` avoid that cost, without the
-hand-written always-inlined recv future and its `fan_out/workers/16` tradeoff?
-`exp/timers-cursor-combined` (`f55717e`, one commit on `39aec83`) is the single select with its
-timer branch folded into the mailbox branch. The select has `main`'s two branches, the stop signal
-first. The second branch is a `poll_fn` over `ActorContext::poll_awaited`, which polls the sleep
-and checks the fired timers' head when a table exists and otherwise does nothing, and then polls the
-recv future pinned in the loop body (`pin!(mailbox.recv())`). It returns an `Awaited` enum: a timer
-event (fired, or deliverable) or the received item. The outer loop fires due timers and takes one
-fired timer per iteration as before, charges the cooperative budget before every wait and counts the
-channel items before the unwatched filter. `mailbox.rs` and `persistence/spawn.rs` are `main`'s; the
-source has one call site of `Mailbox::recv`. Clippy on three feature sets, the timer, test context,
-persistence and core tests, the `#[ignore]`d fairness test, the `hotpath` profile
-(`mailbox::recv` at 110000 calls) and the allocation gate pass.
+hand-written always-inlined recv future and its `fan_out/workers/16` tradeoff? The combined variant
+([`cursor-combined.patch`](patches/cursor-combined.patch) on the cursor, built as `f55717e`, one
+commit on `39aec83`) is the single select with its timer branch folded into the mailbox branch. The
+select has `main`'s two branches, the stop signal first. The second branch is a `poll_fn` over
+`ActorContext::poll_awaited`, which polls the sleep and checks the fired timers' head when a table
+exists and otherwise does nothing, and then polls the recv future pinned in the loop body
+(`pin!(mailbox.recv())`). It returns an `Awaited` enum: a timer event (fired, or deliverable) or the
+received item. The outer loop fires due timers and takes one fired timer per iteration as before,
+charges the cooperative budget before every wait and counts the channel items before the unwatched
+filter. `mailbox.rs` and `persistence/spawn.rs` are `main`'s; the source has one call site of
+`Mailbox::recv`. Clippy on three feature sets, the timer, test context, persistence and core tests,
+the `#[ignore]`d fairness test, the `hotpath` profile (`mailbox::recv` at 110000 calls) and the
+allocation gate pass.
 
 Generated code against `main`, both architectures, before the sweep:
 
@@ -1038,15 +1045,15 @@ throughput rows: the plain cursor, the single select, the combined future and #1
 
 ## Timers as an opt-in per actor type
 
-The decision of 2026-10-27 implemented: `feat/timers-opt-in`, swept as `077c74a`, one commit on
-`main` at `ac59a98`; the later commits of the branch add this record, the protocol extension below
-and the review fix described at the end of this section. `Actor` and `EventSourced` gain `type
-Timers: TimerMode;` with the two sealed modes `Untimed` and `Timed`; the context is `ActorContext<M,
-T = Untimed>`, and `start_timer` and `cancel_timer` exist only on `ActorContext<M, Timed>`. `spawn`
-dispatches on `A::Timers` through the sealed trait to one of two functions, each with its own task
-future: the untimed one expands `main`'s wait macro, the timed one the cursor's, from one macro over
-`main`'s loop body. Neither loop checks the mode, and the timer table of a timed actor lives in its
-context from the start (`RefCell<TimerTable<M>>`, no `Option`, no box). An untimed actor cannot call
+The decision of 2026-10-27 implemented: #185, swept as `077c74a`, one commit on `main` at `ac59a98`;
+the later commits of the branch add this record, the protocol extension below and the review fix
+described at the end of this section. `Actor` and `EventSourced` gain `type Timers: TimerMode;` with
+the two sealed modes `Untimed` and `Timed`; the context is `ActorContext<M, T = Untimed>`, and
+`start_timer` and `cancel_timer` exist only on `ActorContext<M, Timed>`. `spawn` dispatches on
+`A::Timers` through the sealed trait to one of two functions, each with its own task future: the
+untimed one expands `main`'s wait macro, the timed one the cursor's, from one macro over `main`'s
+loop body. Neither loop checks the mode, and the timer table of a timed actor lives in its context
+from the start (`RefCell<TimerTable<M>>`, no `Option`, no box). An untimed actor cannot call
 `start_timer`, and no code outside tellus can call the dispatch: both are pinned by `compile_fail`
 doctests and were checked from a separate crate (E0599 and E0277; a diverging expression such as
 `unreachable!()` type-checks as the private token, so the call can be written but never executed).
@@ -1283,6 +1290,14 @@ candidate's names are normalized with `--rename '_untimed\b='` and `--rename
   widen that, if a later result rests on it.
 ## How to measure
 
+- **Rebuilding a variant:** each variant is a patch in [`patches/`](patches) against its parent
+  design: `cursor.patch` and `inline-gate.patch` against #174's head `283e5e7` (kept by GitHub as
+  `refs/pull/174/head`), the `cursor-*.patch` files against the cursor, and `inline-recv.patch`
+  against `39aec83`. For all but `inline-recv.patch`, `git worktree add --detach <dir> 283e5e7`,
+  then `git apply --index` the patches in order and `git reset --soft 39aec83` before committing.
+  For `inline-recv.patch`, `git worktree add --detach <dir> 39aec83`, then `git apply --index` it
+  and commit. Either gives one commit on `39aec83` whose tree is that of the build named here, as
+  the sweep requires. A patch reproduces the tree byte for byte, not the commit ID.
 - **On GitHub's runners:** push the variant as a branch (the workflow fetches every branch and
   every pull request head), then `gh workflow run stack-sweep.yml -f base=<full parent ID> -f
   candidate=<full commit ID>`. The candidate must be exactly one commit on top of the base. A run

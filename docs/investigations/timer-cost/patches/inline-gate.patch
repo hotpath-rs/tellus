@@ -1,0 +1,184 @@
+diff --git a/tellus/src/actor_context.rs b/tellus/src/actor_context.rs
+index 8e64ac1..a9a8a2e 100644
+--- a/tellus/src/actor_context.rs
++++ b/tellus/src/actor_context.rs
+@@ -4,7 +4,7 @@ use crate::{
+     Actor, ActorConfig, ActorId, ActorRef, Control, Incoming, SupervisionStrategy,
+     actor_ref::{SelfRef, Sink},
+     mailbox::{Mailbox, Queued},
+-    timers::Timers,
++    timers::{TimerId, Timers},
+     watch::WatcherRegistry,
+ };
+ use derive_more::Debug;
+@@ -18,7 +18,7 @@ use std::{
+     mem,
+     panic::{AssertUnwindSafe, catch_unwind},
+     pin::{Pin, pin},
+-    task::Poll,
++    task::{Context, Poll},
+     time::Duration,
+ };
+ use tokio::{
+@@ -227,10 +227,6 @@ impl<M> ActorContext<M> {
+         }
+     }
+ 
+-    pub(crate) fn timer_armed(&mut self) -> bool {
+-        self.timers.get_mut().as_deref().is_some_and(Timers::armed)
+-    }
+-
+     pub(crate) fn timer_sleep(&mut self) -> Option<Pin<&mut Sleep>> {
+         self.timers.get_mut().as_deref_mut()?.sleep()
+     }
+@@ -251,27 +247,33 @@ impl<M> ActorContext<M> {
+         }
+     }
+ 
++    // Inlined into the run loop: out of line, every item is copied around the call.
++    #[inline(always)]
+     pub(crate) fn gate(&self, queued: Queued<M>) -> Option<Incoming<M>> {
+         match queued {
+             Queued::Incoming(incoming) => Some(incoming),
+ 
+-            Queued::Timer(id) => {
+-                let message = self
+-                    .timers
+-                    .borrow_mut()
+-                    .as_deref_mut()
+-                    .and_then(|timers| timers.take(id));
+-                if message.is_none() {
+-                    debug!(
+-                        actor_id = %self.self_ref().actor_id(),
+-                        generation = id.generation(),
+-                        "dropping stale timer"
+-                    );
+-                }
++            Queued::Timer(id) => self.take_timer(id).map(Incoming::Message),
++        }
++    }
+ 
+-                message.map(Incoming::Message)
+-            }
++    // Out of line: the stale timer logging must not grow the run loop.
++    #[inline(never)]
++    fn take_timer(&self, id: TimerId) -> Option<M> {
++        let message = self
++            .timers
++            .borrow_mut()
++            .as_deref_mut()
++            .and_then(|timers| timers.take(id));
++        if message.is_none() {
++            debug!(
++                actor_id = %self.self_ref().actor_id(),
++                generation = id.generation(),
++                "dropping stale timer"
++            );
+         }
++
++        message
+     }
+ 
+     pub(crate) fn take_watched_for(&mut self, other_id: ActorId) -> bool {
+@@ -342,6 +344,22 @@ impl Display for PanicPayload<'_> {
+     }
+ }
+ 
++/// The actor's sleep, pending while no timer is armed.
++pub(crate) struct TimerSleep<'a, M>(pub(crate) &'a mut ActorContext<M>);
++
++impl<M> Future for TimerSleep<'_, M> {
++    type Output = ();
++
++    // No waker without an armed sleep: timers change only in the actor's own callbacks on this
++    // task, and an armed sleep registers its own waker.
++    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
++        match self.0.timer_sleep() {
++            Some(sleep) => sleep.poll(cx),
++            None => Poll::Pending,
++        }
++    }
++}
++
+ /// A macro, not an async fn: the run loops' message hot path must not pay for a nested state
+ /// machine. Expanded, the awaits below are states of the run loop itself, not of a future it has
+ /// to poll into once per message.
+@@ -353,8 +371,6 @@ macro_rules! next_incoming {
+             // other tasks on its worker.
+             consume_budget().await;
+ 
+-            let armed = $context.timer_armed();
+-
+             let queued = tokio::select! {
+                 biased;
+ 
+@@ -367,12 +383,7 @@ macro_rules! next_incoming {
+                 }
+ 
+                 // Before the mailbox, else a mailbox which never runs empty starves a due timer.
+-                _ = async {
+-                    $context
+-                        .timer_sleep()
+-                        .expect("an armed timer has its sleep")
+-                        .await
+-                }, if armed => {
++                _ = crate::actor_context::TimerSleep(&mut $context) => {
+                     $context.fire_due_timers();
+                     continue 'next_incoming;
+                 }
+diff --git a/tellus/src/timers.rs b/tellus/src/timers.rs
+index d1a013c..ae76e6b 100644
+--- a/tellus/src/timers.rs
++++ b/tellus/src/timers.rs
+@@ -59,10 +59,6 @@ impl<M> Timers<M> {
+         }
+     }
+ 
+-    pub(crate) fn armed(&self) -> bool {
+-        self.sleep.is_some()
+-    }
+-
+     pub(crate) fn sleep(&mut self) -> Option<Pin<&mut Sleep>> {
+         self.sleep.as_mut().map(Pin::as_mut)
+     }
+@@ -360,7 +356,7 @@ mod tests {
+     async fn starting_a_timer_arms_the_sleep() {
+         let now = Instant::now();
+         let mut timers = Timers::default();
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+         timers.start("t", 1, Duration::from_secs(1), now);
+         assert_eq!(sleep_deadline(&timers), Some(now + Duration::from_secs(1)));
+     }
+@@ -400,7 +396,7 @@ mod tests {
+         timers.cancel("a");
+         assert_eq!(sleep_deadline(&timers), Some(now + Duration::from_secs(1)));
+         timers.cancel("b");
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+     }
+ 
+     /// Without a pending timer the sleep is dropped, whether the last one fired or was taken with
+@@ -414,11 +410,11 @@ mod tests {
+             .fire_due(now + Duration::from_secs(1))
+             .expect("the timer is due");
+         timers.rearm();
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+ 
+         timers.start("u", 2, Duration::from_secs(1), now);
+         timers.take_all();
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+     }
+ 
+     /// Outside a runtime the table records timers without a sleep.
+@@ -426,7 +422,7 @@ mod tests {
+     fn outside_a_runtime_no_sleep_is_armed() {
+         let mut timers = Timers::default();
+         timers.start("t", 1, Duration::from_secs(1), Instant::now());
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+         assert!(timers.next_deadline().is_some());
+     }
+ 

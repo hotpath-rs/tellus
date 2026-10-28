@@ -1,0 +1,226 @@
+diff --git a/tellus/src/actor_context.rs b/tellus/src/actor_context.rs
+index 440f48a..d2424a9 100644
+--- a/tellus/src/actor_context.rs
++++ b/tellus/src/actor_context.rs
+@@ -18,7 +18,7 @@ use std::{
+     mem,
+     panic::{AssertUnwindSafe, catch_unwind},
+     pin::{Pin, pin},
+-    task::Poll,
++    task::{Context, Poll},
+     time::Duration,
+ };
+ use tokio::{
+@@ -382,76 +382,8 @@ macro_rules! next_incoming {
+     };
+ }
+ 
+-macro_rules! next_incoming_timed {
+-    ($actor_id:expr, $mailbox:expr, $context:expr, $stopped_by_parent:expr) => {
+-        'next_incoming: loop {
+-            // Flume's receive future does not participate in Tokio's cooperative budget. Charge
+-            // one unit explicitly, so an actor whose mailbox never runs empty still yields to the
+-            // other tasks on its worker.
+-            consume_budget().await;
+-
+-            let armed = $context.timer_armed();
+-            let deliverable = $context.timer_deliverable();
+-
+-            let incoming = tokio::select! {
+-                biased;
+-
+-                _ = &mut $stopped_by_parent => {
+-                    tracing::debug!(
+-                        actor_id = %$actor_id,
+-                        "stopping, because parent stopped this actor"
+-                    );
+-                    break 'next_incoming None;
+-                }
+-
+-                // Before the mailbox, else a mailbox which never runs empty starves a due timer.
+-                _ = async {
+-                    $context
+-                        .timer_sleep()
+-                        .expect("an armed timer has its sleep")
+-                        .await
+-                }, if armed => {
+-                    $context.fire_due_timers();
+-                    continue 'next_incoming;
+-                }
+-
+-                // Before the mailbox, else a timer would land behind items queued after it.
+-                _ = std::future::ready(()), if deliverable => {
+-                    match $context.take_due_timer() {
+-                        Some(message) => {
+-                            break 'next_incoming Some(crate::Incoming::Message(message));
+-                        }
+-
+-                        None => continue 'next_incoming,
+-                    }
+-                }
+-
+-                incoming = $mailbox.recv() => {
+-                    $context.count_received();
+-                    incoming.expect("self_ref keeps a mailbox handle alive")
+-                }
+-            };
+-
+-            if let crate::Incoming::Terminated(other) = &incoming
+-                && !$context.take_watched_for(*other)
+-            {
+-                tracing::debug!(
+-                    actor_id = %$actor_id,
+-                    other_id = %*other,
+-                    "dropping terminated signal for an unwatched actor"
+-                );
+-                continue 'next_incoming;
+-            }
+-
+-            break 'next_incoming Some(incoming);
+-        }
+-    };
+-}
+-
+ #[cfg(feature = "persistence")]
+ pub(crate) use next_incoming;
+-#[cfg(feature = "persistence")]
+-pub(crate) use next_incoming_timed;
+ 
+ pub(crate) fn spawn<A>(
+     stopped_by_parent_rx: watch::Receiver<()>,
+@@ -486,7 +418,13 @@ where
+ 
+                 loop {
+                     let incoming = if context.has_timers() {
+-                        next_incoming_timed!(actor_id, mailbox, context, stopped_by_parent)
++                        let next = pin!(next_incoming_timed(
++                            actor_id,
++                            &mut mailbox,
++                            &mut context,
++                            &mut stopped_by_parent
++                        ));
++                        OutOfLine(next).await
+                     } else {
+                         next_incoming!(actor_id, mailbox, context, stopped_by_parent)
+                     };
+@@ -529,6 +467,92 @@ where
+     actor_ref
+ }
+ 
++pub(crate) struct OutOfLine<'a, F>(pub(crate) Pin<&'a mut F>);
++
++impl<F> Future for OutOfLine<'_, F>
++where
++    F: Future,
++{
++    type Output = F::Output;
++
++    #[inline(never)]
++    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
++        self.0.as_mut().poll(cx)
++    }
++}
++
++pub(crate) async fn next_incoming_timed<M, S>(
++    actor_id: ActorId,
++    mailbox: &mut Mailbox<M>,
++    context: &mut ActorContext<M>,
++    stopped_by_parent: &mut Pin<&mut S>,
++) -> Option<Incoming<M>>
++where
++    S: Future,
++{
++    'next_incoming: loop {
++        // Flume's receive future does not participate in Tokio's cooperative budget. Charge
++        // one unit explicitly, so an actor whose mailbox never runs empty still yields to the
++        // other tasks on its worker.
++        consume_budget().await;
++
++        let armed = context.timer_armed();
++        let deliverable = context.timer_deliverable();
++
++        let incoming = tokio::select! {
++            biased;
++
++            _ = &mut *stopped_by_parent => {
++                tracing::debug!(
++                    actor_id = %actor_id,
++                    "stopping, because parent stopped this actor"
++                );
++                break 'next_incoming None;
++            }
++
++            // Before the mailbox, else a mailbox which never runs empty starves a due timer.
++            _ = async {
++                context
++                    .timer_sleep()
++                    .expect("an armed timer has its sleep")
++                    .await
++            }, if armed => {
++                context.fire_due_timers();
++                continue 'next_incoming;
++            }
++
++            // Before the mailbox, else a timer would land behind items queued after it.
++            _ = std::future::ready(()), if deliverable => {
++                match context.take_due_timer() {
++                    Some(message) => {
++                        break 'next_incoming Some(crate::Incoming::Message(message));
++                    }
++
++                    None => continue 'next_incoming,
++                }
++            }
++
++            incoming = mailbox.recv() => {
++                context.count_received();
++                incoming.expect("self_ref keeps a mailbox handle alive")
++            }
++        };
++
++        if let crate::Incoming::Terminated(other) = &incoming
++            && !context.take_watched_for(*other)
++        {
++            tracing::debug!(
++                actor_id = %actor_id,
++                other_id = %*other,
++                "dropping terminated signal for an unwatched actor"
++            );
++            continue 'next_incoming;
++        }
++
++        break 'next_incoming Some(incoming);
++    }
++}
++
+ pub(crate) fn catch_and_log<T, E, F>(actor_id: ActorId, failure: &str, f: F) -> Option<T>
+ where
+     E: Error,
+diff --git a/tellus/src/persistence/spawn.rs b/tellus/src/persistence/spawn.rs
+index 1b54d0c..8f35488 100644
+--- a/tellus/src/persistence/spawn.rs
++++ b/tellus/src/persistence/spawn.rs
+@@ -1,7 +1,7 @@
+ use crate::{
+     ActorConfig, ActorContext, ActorId, ActorRef, ActorSystem,
+     actor_context::{
+-        PanicPayload, STATE_FAILED_TO_DROP, catch_and_log, catch_panic_and_log,
++        OutOfLine, PanicPayload, STATE_FAILED_TO_DROP, catch_and_log, catch_panic_and_log,
+         catch_panic_and_log_async, catch_unwind_async, dispose_error, drop_containing_panic,
+         log_failure, next_incoming, next_incoming_timed, should_restart, terminate,
+     },
+@@ -237,7 +237,13 @@ where
+ 
+                     loop {
+                         let incoming = if context.has_timers() {
+-                            next_incoming_timed!(actor_id, mailbox, context, stopped_by_parent)
++                            let next = pin!(next_incoming_timed(
++                                actor_id,
++                                &mut mailbox,
++                                &mut context,
++                                &mut stopped_by_parent
++                            ));
++                            OutOfLine(next).await
+                         } else {
+                             next_incoming!(actor_id, mailbox, context, stopped_by_parent)
+                         };
