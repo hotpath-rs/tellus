@@ -1,0 +1,77 @@
+diff --git a/tellus/src/mailbox.rs b/tellus/src/mailbox.rs
+index 5df9522..a669df5 100644
+--- a/tellus/src/mailbox.rs
++++ b/tellus/src/mailbox.rs
+@@ -3,10 +3,14 @@ use crate::{
+     quota::{CountedSendError, CountedSender, Full, Quota},
+     watch::{ActorTerminated, TerminatedHandler, WatcherRegistration, WatcherRegistry},
+ };
+-use flume::Receiver;
+ #[cfg(feature = "test-util")]
+ use flume::TryRecvError;
+-use std::sync::Arc;
++use flume::{Receiver, r#async::RecvFut};
++use std::{
++    pin::Pin,
++    sync::Arc,
++    task::{Context, Poll, ready},
++};
+ use thiserror::Error;
+ 
+ /// Sending mailbox half.
+@@ -65,14 +69,15 @@ pub(crate) struct Mailbox<M> {
+ }
+ 
+ impl<M> Mailbox<M> {
+-    /// `&mut self` to enforce one consumer per mailbox.
+-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
++    #[cfg(feature = "hotpath")]
++    #[hotpath::measure]
+     pub(crate) async fn recv(&mut self) -> Option<Incoming<M>> {
+-        let incoming = self.incoming_rx.recv_async().await.ok()?;
+-        if matches!(incoming, Incoming::Message(_)) {
+-            self.quota.unreserve();
+-        }
+-        Some(incoming)
++        self.recv_future().await
++    }
++
++    #[cfg(not(feature = "hotpath"))]
++    pub(crate) fn recv(&mut self) -> Recv<'_, M> {
++        self.recv_future()
+     }
+ 
+     #[cfg(feature = "test-util")]
+@@ -92,6 +97,32 @@ impl<M> Mailbox<M> {
+     pub(crate) fn split(self) -> (Receiver<Incoming<M>>, WatcherRegistration) {
+         (self.incoming_rx, self.watcher_registration)
+     }
++
++    /// `&mut self` to enforce one consumer per mailbox.
++    fn recv_future(&mut self) -> Recv<'_, M> {
++        Recv {
++            incoming: self.incoming_rx.recv_async(),
++            quota: &self.quota,
++        }
++    }
++}
++
++pub(crate) struct Recv<'a, M> {
++    incoming: RecvFut<'a, Incoming<M>>,
++    quota: &'a Quota,
++}
++
++impl<M> Future for Recv<'_, M> {
++    type Output = Option<Incoming<M>>;
++
++    #[inline(always)]
++    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
++        let incoming = ready!(Pin::new(&mut self.incoming).poll(cx)).ok();
++        if matches!(incoming, Some(Incoming::Message(_))) {
++            self.quota.unreserve();
++        }
++        Poll::Ready(incoming)
++    }
+ }
+ 
+ #[derive(Debug, Error)]

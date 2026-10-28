@@ -1,0 +1,340 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 785a203..cd53c61 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -343,8 +343,8 @@ cross-file invariants:
+   creates and moves only for an earlier deadline. A due timer never enters the mailbox: the table
+   records it with a position, the items received so far plus the mailbox's length when it fired,
+   and the run loop takes it, one per iteration and stale ones dropped, once it has received that
+-  many items. An actor without a timer table runs the plain loop, which neither polls a sleep nor
+-  counts items.
++  many items. An actor without a timer table polls the same branch, which is then never ready and
++  registers no waker, since timers change only in the actor's own synchronous callbacks.
+ - `mailbox.rs` is where messaging and death watch meet: one FIFO flume channel per actor, always
+   unbounded underneath, with a bounded capacity enforced by a reservation counter (`quota.rs`) in
+   front. Terminated signals bypass the capacity check but ride the same FIFO channel as ordinary
+diff --git a/docs/actors.md b/docs/actors.md
+index c1efde1..63c108b 100644
+--- a/docs/actors.md
++++ b/docs/actors.md
+@@ -243,10 +243,12 @@ it was due already. The run loop takes one fired timer per iteration, received o
+ skipping many stale timers still charges the cooperative budget and checks the stop signal between
+ them.
+ 
+-The run loop in [`actor_context.rs`](../tellus/src/actor_context.rs) waits on the sleep and counts
+-the items it receives only once the actor has a timer table, which its first `start_timer` creates
+-and which it keeps from then on. Before that, the run loop waits for its stop signal and its
+-mailbox alone, as it would without timers.
++The run loop in [`actor_context.rs`](../tellus/src/actor_context.rs) polls the timer table through
++one branch of its select in every iteration. The first `start_timer` creates the table, and the
++actor keeps it from then on. Without a table that branch is never ready and registers no waker:
++timers change only in the actor's own synchronous callbacks on the same task, so nothing has to
++wake the loop for them. With a table the branch polls the sleep and checks the fired timers'
++positions.
+ 
+ A restart cancels all timers, fired ones included, since a timer encodes a deadline of the old
+ state; termination drops them, right after the messages drained from the mailbox (see stopping and
+@@ -309,8 +311,8 @@ event-sourced actors enter the same loop through
+    `Restart` even the first initialization is retried.
+ 2. Loop: wait (biased) for the parent's stop signal, a due timer, a fired timer whose position has
+    been reached, or the next item from the mailbox. Fire a due timer instead of receiving anything;
+-   pass the message of a fired timer, or the item, to `receive`. Until the actor has started its
+-   first timer, wait for the stop signal and the mailbox alone (see timers above).
++   pass the message of a fired timer, or the item, to `receive`. The timer branch is polled in
++   every iteration; without a timer table it is never ready (see timers above).
+ 3. Map the result to an outcome: `Continue` carries the next state, an error or panic consults the
+    `SupervisionStrategy` (`Restart` or `Stop`), `Control::Stop` stops.
+ 4. On stop, run the termination sequence below.
+diff --git a/tellus/src/actor_context.rs b/tellus/src/actor_context.rs
+index 440f48a..8ae636f 100644
+--- a/tellus/src/actor_context.rs
++++ b/tellus/src/actor_context.rs
+@@ -4,7 +4,7 @@ use crate::{
+     Actor, ActorConfig, ActorId, ActorRef, Control, Incoming, SupervisionStrategy,
+     actor_ref::{SelfRef, Sink},
+     mailbox::Mailbox,
+-    timers::{Delivery, Timers},
++    timers::{Delivery, TimerEvent, Timers},
+     watch::WatcherRegistry,
+ };
+ use derive_more::Debug;
+@@ -18,14 +18,14 @@ use std::{
+     mem,
+     panic::{AssertUnwindSafe, catch_unwind},
+     pin::{Pin, pin},
+-    task::Poll,
++    task::{Context, Poll},
+     time::Duration,
+ };
+ use tokio::{
+     select,
+     sync::watch,
+     task::{self, consume_budget},
+-    time::{Instant, Sleep, sleep},
++    time::{Instant, sleep},
+ };
+ use tracing::{debug, error};
+ 
+@@ -228,23 +228,12 @@ impl<M> ActorContext<M> {
+         }
+     }
+ 
+-    pub(crate) fn has_timers(&mut self) -> bool {
+-        self.timers.get_mut().is_some()
+-    }
+-
+-    pub(crate) fn timer_armed(&mut self) -> bool {
+-        self.timers.get_mut().as_deref().is_some_and(Timers::armed)
+-    }
+-
+-    pub(crate) fn timer_deliverable(&mut self) -> bool {
+-        self.timers
+-            .get_mut()
+-            .as_deref()
+-            .is_some_and(Timers::deliverable)
+-    }
+-
+-    pub(crate) fn timer_sleep(&mut self) -> Option<Pin<&mut Sleep>> {
+-        self.timers.get_mut().as_deref_mut()?.sleep()
++    // Timers change only in synchronous actor callbacks on this task.
++    pub(crate) fn poll_timer_event(&mut self, cx: &mut Context<'_>) -> Poll<TimerEvent> {
++        match self.timers.get_mut() {
++            Some(timers) => timers.poll_event(cx),
++            None => Poll::Pending,
++        }
+     }
+ 
+     pub(crate) fn fire_due_timers(&mut self) {
+@@ -280,6 +269,14 @@ impl<M> ActorContext<M> {
+         self.watched.get_mut().remove(&other_id).is_some()
+     }
+ 
++    #[cfg(feature = "test-util")]
++    pub(crate) fn timer_deliverable(&mut self) -> bool {
++        self.timers
++            .get_mut()
++            .as_deref()
++            .is_some_and(Timers::deliverable)
++    }
++
+     #[cfg(feature = "test-util")]
+     pub(crate) fn pending_timers(&self) -> Vec<(&'static str, Instant)> {
+         self.timers
+@@ -361,70 +358,21 @@ macro_rules! next_incoming {
+                     break 'next_incoming None;
+                 }
+ 
+-                incoming = $mailbox.recv() => {
+-                    incoming.expect("self_ref keeps a mailbox handle alive")
+-                }
+-            };
+-
+-            if let crate::Incoming::Terminated(other) = &incoming
+-                && !$context.take_watched_for(*other)
+-            {
+-                tracing::debug!(
+-                    actor_id = %$actor_id,
+-                    other_id = %*other,
+-                    "dropping terminated signal for an unwatched actor"
+-                );
+-                continue 'next_incoming;
+-            }
+-
+-            break 'next_incoming Some(incoming);
+-        }
+-    };
+-}
+-
+-macro_rules! next_incoming_timed {
+-    ($actor_id:expr, $mailbox:expr, $context:expr, $stopped_by_parent:expr) => {
+-        'next_incoming: loop {
+-            // Flume's receive future does not participate in Tokio's cooperative budget. Charge
+-            // one unit explicitly, so an actor whose mailbox never runs empty still yields to the
+-            // other tasks on its worker.
+-            consume_budget().await;
+-
+-            let armed = $context.timer_armed();
+-            let deliverable = $context.timer_deliverable();
+-
+-            let incoming = tokio::select! {
+-                biased;
+-
+-                _ = &mut $stopped_by_parent => {
+-                    tracing::debug!(
+-                        actor_id = %$actor_id,
+-                        "stopping, because parent stopped this actor"
+-                    );
+-                    break 'next_incoming None;
+-                }
+-
+-                // Before the mailbox, else a mailbox which never runs empty starves a due timer.
+-                _ = async {
+-                    $context
+-                        .timer_sleep()
+-                        .expect("an armed timer has its sleep")
+-                        .await
+-                }, if armed => {
+-                    $context.fire_due_timers();
+-                    continue 'next_incoming;
+-                }
+-
+                 // Before the mailbox, else a timer would land behind items queued after it.
+-                _ = std::future::ready(()), if deliverable => {
+-                    match $context.take_due_timer() {
++                event = std::future::poll_fn(|cx| $context.poll_timer_event(cx)) => match event {
++                    crate::timers::TimerEvent::Fired => {
++                        $context.fire_due_timers();
++                        continue 'next_incoming;
++                    }
++
++                    crate::timers::TimerEvent::Deliverable => match $context.take_due_timer() {
+                         Some(message) => {
+                             break 'next_incoming Some(crate::Incoming::Message(message));
+                         }
+ 
+                         None => continue 'next_incoming,
+-                    }
+-                }
++                    },
++                },
+ 
+                 incoming = $mailbox.recv() => {
+                     $context.count_received();
+@@ -450,8 +398,6 @@ macro_rules! next_incoming_timed {
+ 
+ #[cfg(feature = "persistence")]
+ pub(crate) use next_incoming;
+-#[cfg(feature = "persistence")]
+-pub(crate) use next_incoming_timed;
+ 
+ pub(crate) fn spawn<A>(
+     stopped_by_parent_rx: watch::Receiver<()>,
+@@ -485,11 +431,7 @@ where
+                 up_since = Some(Instant::now());
+ 
+                 loop {
+-                    let incoming = if context.has_timers() {
+-                        next_incoming_timed!(actor_id, mailbox, context, stopped_by_parent)
+-                    } else {
+-                        next_incoming!(actor_id, mailbox, context, stopped_by_parent)
+-                    };
++                    let incoming = next_incoming!(actor_id, mailbox, context, stopped_by_parent);
+                     let Some(incoming) = incoming else {
+                         drop_containing_panic(actor_id, STATE_FAILED_TO_DROP, state);
+                         break 'run;
+diff --git a/tellus/src/persistence/spawn.rs b/tellus/src/persistence/spawn.rs
+index 1b54d0c..42144ae 100644
+--- a/tellus/src/persistence/spawn.rs
++++ b/tellus/src/persistence/spawn.rs
+@@ -3,7 +3,7 @@ use crate::{
+     actor_context::{
+         PanicPayload, STATE_FAILED_TO_DROP, catch_and_log, catch_panic_and_log,
+         catch_panic_and_log_async, catch_unwind_async, dispose_error, drop_containing_panic,
+-        log_failure, next_incoming, next_incoming_timed, should_restart, terminate,
++        log_failure, next_incoming, should_restart, terminate,
+     },
+     actor_ref::SelfRef,
+     actor_system::watch_root,
+@@ -236,11 +236,8 @@ where
+                     up_since = Some(Instant::now());
+ 
+                     loop {
+-                        let incoming = if context.has_timers() {
+-                            next_incoming_timed!(actor_id, mailbox, context, stopped_by_parent)
+-                        } else {
+-                            next_incoming!(actor_id, mailbox, context, stopped_by_parent)
+-                        };
++                        let incoming =
++                            next_incoming!(actor_id, mailbox, context, stopped_by_parent);
+                         let Some(incoming) = incoming else {
+                             drop_containing_panic(actor_id, STATE_FAILED_TO_DROP, state);
+                             break 'run;
+diff --git a/tellus/src/timers.rs b/tellus/src/timers.rs
+index f426b6b..e6d69a2 100644
+--- a/tellus/src/timers.rs
++++ b/tellus/src/timers.rs
+@@ -1,6 +1,7 @@
+ use std::{
+     collections::{HashMap, VecDeque},
+     pin::Pin,
++    task::{Context, Poll},
+     time::Duration,
+ };
+ use tokio::{
+@@ -65,12 +66,17 @@ impl<M> Timers<M> {
+         }
+     }
+ 
+-    pub(crate) fn armed(&self) -> bool {
+-        self.sleep.is_some()
+-    }
+-
+-    pub(crate) fn sleep(&mut self) -> Option<Pin<&mut Sleep>> {
+-        self.sleep.as_mut().map(Pin::as_mut)
++    // A ready sleep before a deliverable timer, else a mailbox which never runs empty starves it.
++    pub(crate) fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<TimerEvent> {
++        if let Some(sleep) = &mut self.sleep
++            && sleep.as_mut().poll(cx).is_ready()
++        {
++            return Poll::Ready(TimerEvent::Fired);
++        }
++        if self.deliverable() {
++            return Poll::Ready(TimerEvent::Deliverable);
++        }
++        Poll::Pending
+     }
+ 
+     pub(crate) fn fire_due_timers(&mut self, now: Instant, queued: usize) {
+@@ -234,6 +240,11 @@ impl<M> Default for Timers<M> {
+     }
+ }
+ 
++pub(crate) enum TimerEvent {
++    Fired,
++    Deliverable,
++}
++
+ pub(crate) enum Delivery<M> {
+     Message(M),
+ 
+@@ -505,7 +516,7 @@ mod tests {
+     async fn starting_a_timer_arms_the_sleep() {
+         let now = Instant::now();
+         let mut timers = Timers::default();
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+         timers.start("t", 1, Duration::from_secs(1), now);
+         assert_eq!(sleep_deadline(&timers), Some(now + Duration::from_secs(1)));
+     }
+@@ -545,7 +556,7 @@ mod tests {
+         timers.cancel("a");
+         assert_eq!(sleep_deadline(&timers), Some(now + Duration::from_secs(1)));
+         timers.cancel("b");
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+     }
+ 
+     /// Without a pending timer the sleep is dropped, whether the last one fired or was taken with
+@@ -559,11 +570,11 @@ mod tests {
+             .fire_due(now + Duration::from_secs(1))
+             .expect("the timer is due");
+         timers.rearm();
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+ 
+         timers.start("u", 2, Duration::from_secs(1), now);
+         timers.take_all();
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+     }
+ 
+     /// Outside a runtime the table records timers without a sleep.
+@@ -571,7 +582,7 @@ mod tests {
+     fn outside_a_runtime_no_sleep_is_armed() {
+         let mut timers = Timers::default();
+         timers.start("t", 1, Duration::from_secs(1), Instant::now());
+-        assert!(!timers.armed());
++        assert!(sleep_deadline(&timers).is_none());
+         assert!(timers.next_deadline().is_some());
+     }
+ 
