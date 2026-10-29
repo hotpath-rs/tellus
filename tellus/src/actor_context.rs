@@ -117,9 +117,8 @@ where
             let piped = async move { into_message(future.await) };
             if let Some(message) =
                 catch_panic_and_log_async(actor_id, "piped future failed", piped).await
-                && let Err(error) = actor_ref.try_tell_forced(message)
             {
-                actor_ref.dead_letter(&error);
+                actor_ref.tell_forced(message);
             }
         });
     }

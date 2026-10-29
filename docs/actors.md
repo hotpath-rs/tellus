@@ -113,17 +113,24 @@ resolves once the root, and therefore the entire tree, has terminated.
 
 | Field                  | Default     | Meaning                                                                       |
 | ---------------------- | ----------- | ----------------------------------------------------------------------------- |
-| `mailbox_capacity`     | `Unbounded` | Mailbox capacity; excess messages become dead letters                          |
+| `mailbox_capacity`     | `Unbounded` | Mailbox capacity; excess messages become dead letters, with exceptions below   |
 | `supervision_strategy` | `Stop`      | What happens when the actor fails: `Stop` or `Restart` with a `RestartPolicy`  |
 
-An unbounded mailbox never drops messages, but an actor which cannot keep up grows it without
-limit. A bounded mailbox applies no backpressure: sends to a full mailbox fail as dead letters,
-while terminated signals and the outputs of piped futures are still delivered.
+An unbounded mailbox never drops messages, but an actor which cannot keep up grows it without limit.
+A bounded mailbox applies no backpressure: sends to a full mailbox fail as dead letters, while
+terminated signals, the outputs of piped futures and the replies to a `reply_to` are still
+delivered.
 
-Prefer a bounded mailbox: its capacity caps the memory, and every dropped message shows up as a
-dead letter at warn level instead of as a growing process. Size it by the number of messages the
-protocol allows in flight or, failing that, by the largest burst the actor should absorb. The
-default is unbounded only because no capacity fits every actor.
+Prefer a bounded mailbox: its capacity caps the memory taken by ordinary messages, and every dropped
+message shows up as a dead letter at warn level instead of as a growing process. Size it by the
+number of messages the protocol allows in flight or, failing that, by the largest burst the actor
+should absorb. The default is unbounded only because no capacity fits every actor.
+
+The capacity does not cap what the actor started itself. The outputs of its piped futures and the
+replies to its `reply_to` destinations pass a full mailbox, up to one per future in flight and one
+per open `ReplyTo`. Nothing limits how many of those are open. An actor which pipes a future or
+opens a `reply_to` per request to a slow backend can hence hold far more than its capacity, unless
+it bounds its open requests itself, e.g. with a window.
 
 The `serde` feature makes the whole configuration deserializable, so it can come from a config
 file. The invariants it carries, `0 < min` and `min <= max` on the backoff bounds, live in
@@ -175,9 +182,16 @@ letter too, followed by a best-effort notification that no reply will come; see
 [`ActorContext::reply_to`](../tellus/src/request_response.rs) is the actor side: it creates a
 `ReplyTo` which delivers the reply into this actor's own mailbox, converted into its message type
 by the given function, typically an enum variant constructor. No future is created or awaited; the
-reply arrives through `receive` like any other message, in the normal mailbox FIFO. It takes the
-same path as a tell to this actor: it counts against a bounded capacity and becomes a dead letter
-if the asker has terminated or its mailbox is full.
+reply arrives through `receive` like any other message, in the normal mailbox FIFO. A full bounded
+mailbox does not refuse the reply. The asker waits for it, and a `ReplyTo` replies at most once. So
+the mailbox exceeds its capacity by at most one reply per open `ReplyTo`. The reply still counts
+against the capacity, so ordinary senders are refused until the mailbox has drained back under it.
+The output of a piped future is delivered the same way (see piping futures below). On the asker's
+node, the reply becomes a dead letter only if the asker has terminated. A reply from another node
+can also be lost on its way, e.g. to a full outbound queue on the responder's node; see
+[cluster.md](cluster.md). This side has no `NoReply`: a missing reply goes unnoticed. An actor which
+must detect one therefore declares `type Timers = Timed`, starts a timer per request and cancels it
+once the reply has arrived (see timers below).
 
 Supervision composes with the retained mailbox: a request queued behind a failing message survives
 a restart and is answered by the restarted state, while a request consumed by the failing
@@ -630,8 +644,10 @@ has to wait for the actor, since `tell` returns before the message is handled.
   piped to the actor via `pipe_to_self`, whose output arrives as a message, at most once, and is
   not refused by a full bounded mailbox.
 - Request-response is at-most-once too: `ask` resolves exactly once, with the reply or an error,
-  at the latest when its timeout elapses, and never redelivers; a `reply_to` reply is an ordinary
-  send, dropped as a dead letter if the asker is gone or its bounded mailbox is full.
+  at the latest when its timeout elapses, and never redelivers; a `reply_to` reply arrives at most
+  once and is not refused by a full bounded mailbox. On the asker's node it becomes a dead letter
+  only if the asker is gone; a reply from another node can also be lost on its way. A missing reply
+  is never reported. Detecting one takes a timer per request.
 - A canceled or replaced timer is never received, even when it was due already.
 - A message which arrived before a timer's deadline is handled before the timer's message. The run
   loop fires a due timer between two items, so it can also land behind messages which arrived

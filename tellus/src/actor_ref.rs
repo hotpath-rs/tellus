@@ -61,10 +61,20 @@ impl<M> ActorRef<M> {
         self.local_mailbox_handle().try_send_message(message)
     }
 
-    /// Enqueue past a full mailbox, for messages the framework has already accepted on the
-    /// sender's behalf, e.g. what a [Host] buffered while an entity stopped.
+    /// Like [ActorRef::try_tell_forced], but logging a dead letter if the actor has terminated.
+    pub(crate) fn tell_forced(&self, message: M) {
+        if let Err(error) = self.try_tell_forced(message) {
+            self.dead_letter(&error);
+        }
+    }
+
+    /// Enqueue past a full mailbox, still counted against the capacity, so ordinary senders are
+    /// refused until the mailbox has drained back under it.
     ///
-    /// [Host]: crate::Host
+    /// Only for a message whose loss would break a promise already made: the framework accepted it
+    /// on the sender's behalf, or the actor waits for it. The messages forced this way must also be
+    /// bounded by something other than the capacity, e.g. a buffer size or the requests the actor
+    /// has open.
     pub(crate) fn try_tell_forced(&self, message: M) -> Result<(), SendError> {
         self.local_mailbox_handle().try_send_forced_message(message)
     }
