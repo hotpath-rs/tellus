@@ -12,7 +12,7 @@ Tasks are defined in the [justfile](justfile):
   needs Docker.
 - `just check` / `just lint` / `just test`: the individual steps, each a feature matrix, every run
   scoped to one crate. Check and lint drive the matrix with `cargo hack --feature-powerset`: the
-  `powerset` variable in the justfile takes `hotpath`, `hotpath-alloc` and `hotpath-cloud` off the axes and
+  `powerset` variable in the justfile takes `hotpath`, `hotpath-alloc`, `hotpath-callgrind` and `hotpath-cloud` off the axes and
   declares nothing mutually exclusive, which leaves 60 runs of `-p tellus`. No feature may be
   excluded against one which implies it: cargo-hack resolves a group, so excluding `persistence`
   against `persistence-tests` also drops `persistence-tests,persistence-in-memory`, the one
@@ -94,7 +94,7 @@ Benchmarks:
   absolute regressions.
 - `just profile-alloc-gate`: run the profiling workload with allocation tracking and fail unless
   `tell`, `reserve` and `receive_incoming` allocate exactly 0 bytes; `profile-alloc-check <file>`
-  applies that check to an existing JSON report. CI (`profile.yml`) uploads both workloads to hotpath Cloud (PR reports go through `hotpath-relay.yml`), which comments on every PR and posts a `hotpath / <benchmark>` check on its head commit. Under `pr_check = "fail"` in `hotpath/<benchmark>-policy.toml` that check fails only when a zero-alloc rule (an `alloc.total = "0 B"` budget) breaks; allocation regressions above 2% and timing are reported in the comment without failing it. The profile jobs themselves pass; make the check required to block merging.
+  applies that check to an existing JSON report. CI (`profile.yml`) runs each workload twice on a pinned runner image, toolchain and Valgrind package (`VALGRIND_VERSION`), since instruction counts compare only within one such environment. The first run is native and writes `native.json`. The second runs under Callgrind (x86_64 Linux only) with `HOTPATH_MERGE_REPORT` pointing at it. The merged report takes everything but the instruction counts from the native run. Instruction counts complement Criterion and do not show contention, since Valgrind serializes threads. It uploads the merged reports to hotpath Cloud as the `profile` and `profile_persistence` series (PR reports go through `hotpath-relay.yml`), which comments on every PR and posts a `hotpath / <benchmark>` check on its head commit. Under `pr_check = "fail"` in `hotpath/<benchmark>-policy.toml` that check fails only when a zero-alloc rule (an `alloc.total = "0 B"` budget) breaks; allocation regressions above 2% and instruction count changes above 3% are reported in the comment without failing it, and timing is listed (`judged = false`) but never judged. The profile jobs themselves pass unless a report is not merged or lacks instruction counts or timing; make the check required to block merging.
 - `just profile-persistence` / `just profile-persistence-alloc`: the same for the persistence code
   (`tellus/examples/profile_persistence.rs`, features `hotpath` plus `persistence` and
   `persistence-in-memory`): command

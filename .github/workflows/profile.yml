@@ -12,11 +12,16 @@ concurrency:
   group: profile-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  VALGRIND_VERSION: "3.26.0"
+
 jobs:
   upload:
     name: Profile ${{ matrix.benchmark }} (upload)
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    # Instruction counts only compare within one Valgrind build and Rust toolchain, so the image,
+    # the package and the toolchain are pinned.
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -52,18 +57,40 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Profile and upload report
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "valgrind=1:${VALGRIND_VERSION}-0ubuntu1"
+          valgrind --version
+
+      - name: Profile natively
+        env:
+          HOTPATH_BENCHMARK: ${{ matrix.benchmark }}
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: ${{ runner.temp }}/native.json
+        run: just ${{ matrix.recipe }} hotpath-callgrind hotpath-cloud
+
+      - name: Profile under Callgrind and upload merged report
         env:
           HOTPATH_UPLOAD: 1
           HOTPATH_BENCHMARK: ${{ matrix.benchmark }}
-          HOTPATH_USER_METADATA: runner=${{ runner.os }}-${{ runner.arch }},toolchain=${{ steps.toolchain.outputs.stable }},profile=release
-          HOTPATH_OUTPUT_FORMAT: none
-        run: just ${{ matrix.recipe }} hotpath-cloud
+          HOTPATH_USER_METADATA: runner=${{ runner.os }}-${{ runner.arch }},toolchain=${{ steps.toolchain.outputs.stable }},profile=release,valgrind=${{ env.VALGRIND_VERSION }}
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: ${{ runner.temp }}/report.json
+          HOTPATH_MERGE_REPORT: ${{ runner.temp }}/native.json
+          HOTPATH_CALLGRIND_OUT_FILE: ${{ runner.temp }}/callgrind.out.%p
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: valgrind -q --tool=callgrind --instr-atstart=no --callgrind-out-file=${{ runner.temp }}/callgrind.out.%p
+        run: |
+          just ${{ matrix.recipe }} hotpath-callgrind hotpath-cloud
+          jq -e '.meta.run == "merged" and (.functions_icount.data | length > 0) and (.functions_timing.data | length > 0)' \
+            "$HOTPATH_OUTPUT_PATH" > /dev/null
 
   report:
     name: Profile ${{ matrix.benchmark }}
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    # Instruction counts only compare within one Valgrind build and Rust toolchain, so the image,
+    # the package and the toolchain are pinned.
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -100,15 +127,33 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Profile and write report
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "valgrind=1:${VALGRIND_VERSION}-0ubuntu1"
+          valgrind --version
+
+      - name: Profile natively
         env:
           HOTPATH_BENCHMARK: ${{ matrix.benchmark }}
-          HOTPATH_USER_METADATA: runner=${{ runner.os }}-${{ runner.arch }},toolchain=${{ steps.toolchain.outputs.stable }},profile=release
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: ${{ runner.temp }}/native.json
+        run: just ${{ matrix.recipe }} hotpath-callgrind hotpath-cloud
+
+      - name: Profile under Callgrind and write merged report
+        env:
+          HOTPATH_BENCHMARK: ${{ matrix.benchmark }}
+          HOTPATH_USER_METADATA: runner=${{ runner.os }}-${{ runner.arch }},toolchain=${{ steps.toolchain.outputs.stable }},profile=release,valgrind=${{ env.VALGRIND_VERSION }}
           HOTPATH_OUTPUT_FORMAT: json
           HOTPATH_OUTPUT_PATH: report.json
+          HOTPATH_MERGE_REPORT: ${{ runner.temp }}/native.json
+          HOTPATH_CALLGRIND_OUT_FILE: ${{ runner.temp }}/callgrind.out.%p
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: valgrind -q --tool=callgrind --instr-atstart=no --callgrind-out-file=${{ runner.temp }}/callgrind.out.%p
         run: |
-          just ${{ matrix.recipe }} hotpath-cloud
+          just ${{ matrix.recipe }} hotpath-callgrind hotpath-cloud
           test -s report.json
+          jq -e '.meta.run == "merged" and (.functions_icount.data | length > 0) and (.functions_timing.data | length > 0)' \
+            report.json > /dev/null
 
       - name: Store report for the relay
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
