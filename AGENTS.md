@@ -151,10 +151,15 @@ Releases:
 
 - release-plz opens or updates a release PR whenever `main` has unreleased changes; merging it
   publishes the crates and tags them (`tellus-vX.Y.Z`, `tellus-persistence-postgres-vX.Y.Z`).
-- After every release, pin the website's submodule to the new tag with `just pin-tellus
-  tellus-vX.Y.Z` in [tellus-rs.github.io](https://github.com/tellus-rs/tellus-rs.github.io). The
-  site shows code from the examples and tests of the pinned tag and reads the version it displays
-  from there.
+- The website [tellus-rs.github.io](https://github.com/tellus-rs/tellus-rs.github.io) pins
+  tellus as a submodule at a release tag. It shows code from the examples and tests of the pinned
+  tag and reads the version it displays from there. Its daily `pin-tellus.yml` workflow notices a
+  new `tellus-vX.Y.Z` tag, pins it on the branch `pin/tellus-vX.Y.Z` and opens a draft PR listing
+  every tellus change since the last pin; `gh workflow run pin-tellus.yml -R
+  tellus-rs/tellus-rs.github.io` starts it right away. Before that PR is marked ready, every listed
+  change is reviewed for statements on the site which it makes false, with the site's
+  `update-site-docs` skill. A tellus PR changing such a statement can say so in its description,
+  as a hint for that review.
 
 CI enforces that a PR consists of exactly one commit; squash before pushing.
 
