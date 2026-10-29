@@ -88,9 +88,17 @@ where
     /// side of request-response: no future is created or awaited, the reply arrives via
     /// [Actor::receive](crate::Actor::receive) like any other message.
     ///
-    /// The reply takes the same path as an [ActorRef::tell] to this actor: it counts against a
-    /// bounded mailbox capacity and is dropped and logged as a dead letter if this actor has
-    /// terminated or its mailbox is full.
+    /// The reply is enqueued even if this actor's bounded mailbox is full. A [ReplyTo] replies at
+    /// most once, so the mailbox exceeds its capacity by at most one reply per open [ReplyTo].
+    /// Nothing limits how many are open. The reply still counts against the capacity, so ordinary
+    /// senders are refused until the mailbox has drained back under it. On this node, the reply is
+    /// dropped and logged as a dead letter only if this actor has terminated. A reply from another
+    /// node can also be lost before it arrives, like a remote tell; see docs/cluster.md.
+    ///
+    /// Unlike [ActorRef::ask], this side has no `NoReply`: a reply the responder never sends, or
+    /// one lost on its way, is never reported. An actor which must detect a missing reply declares
+    /// `type Timers = Timed`, starts a timer per request with [ActorContext::start_timer] and
+    /// cancels it with [ActorContext::cancel_timer] once the reply has arrived.
     pub fn reply_to<R, F>(&self, into_message: F) -> ReplyTo<R>
     where
         F: FnOnce(R) -> M + Send + 'static,
@@ -101,7 +109,7 @@ where
         #[cfg(feature = "cluster")]
         let wire = cluster::ReplyToWire::for_recipient(&actor_ref);
 
-        let reply_to = ReplyTo::new(move |reply| actor_ref.tell(into_message(reply)));
+        let reply_to = ReplyTo::new(move |reply| actor_ref.tell_forced(into_message(reply)));
         #[cfg(feature = "cluster")]
         let reply_to = reply_to.with_wire(wire);
 

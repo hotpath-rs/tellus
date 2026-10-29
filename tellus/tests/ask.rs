@@ -260,11 +260,13 @@ async fn a_failing_ask_message_fails_as_no_reply() {
     assert_terminates(system, "actor system did not terminate").await;
 }
 
-/// A `reply_to` reply is quota-counted like any tell: sent to the asker's full bounded mailbox it
-/// is dropped, never delivered ahead of queued messages. The asker reports every message it
-/// processes; observing the filler and then the probe, but never the reply, proves the drop.
+/// A `reply_to` reply is enqueued past the asker's full bounded mailbox, behind the queued
+/// messages, and counts against the capacity. The second `Block` fills the single slot while the
+/// asker is blocked in the first. Once the asker holds the second `Block`, only the reply is
+/// queued, so an ordinary message is refused only because the reply counts. Observing the reply
+/// and then the probe proves the delivery.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_reply_to_a_full_asker_mailbox_is_a_dead_letter() {
+async fn a_reply_to_a_full_asker_mailbox_is_received_and_counted() {
     let (unblock_tx, unblock_rx) = std::sync::mpsc::channel();
     let (blocked_tx, mut blocked_rx) = mpsc::channel(1);
     let (reply_to_tx, mut reply_to_rx) = mpsc::channel(1);
@@ -288,13 +290,22 @@ async fn a_reply_to_a_full_asker_mailbox_is_a_dead_letter() {
     system.root().tell(BlockedAskerMessage::Block);
     recv(&mut blocked_rx, "asker did not block").await;
 
-    system.root().tell(BlockedAskerMessage::Filler);
+    system.root().tell(BlockedAskerMessage::Block);
     reply_to.reply(42);
 
     unblock_tx.send(()).expect("unblock channel closed");
+    recv(&mut blocked_rx, "asker did not block again").await;
 
-    let observed = recv(&mut observed_rx, "asker did not observe the filler").await;
-    assert_eq!(observed, Observed::Filler);
+    let refused = system
+        .root()
+        .ask::<(), _>(TIMEOUT, |_| BlockedAskerMessage::Filler)
+        .await;
+    assert!(matches!(refused, Err(AskError::MailboxFull)));
+
+    unblock_tx.send(()).expect("unblock channel closed");
+
+    let observed = recv(&mut observed_rx, "asker did not observe the reply").await;
+    assert_eq!(observed, Observed::Reply(42));
 
     system.root().tell(BlockedAskerMessage::Probe);
 
@@ -641,8 +652,8 @@ enum FragileRequest {
 }
 
 /// Hand out a reply destination, block on demand, then report every message it processes, so the
-/// test can prove a dropped reply was never delivered. `block_in_place`, else it strands whatever
-/// task sits in this worker's LIFO slot.
+/// test can prove where the reply was delivered. `block_in_place`, else it strands whatever task
+/// sits in this worker's LIFO slot.
 struct BlockedAsker {
     unblock_rx: std::sync::mpsc::Receiver<()>,
     blocked_tx: mpsc::Sender<()>,

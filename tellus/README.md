@@ -49,8 +49,8 @@ tellus is under active development and its API is still settling.
   message from that actor it will ever see; `unwatch` holds even against an enqueued signal.
 - **Supervision strategies**: on an error or panic, `Restart` with a restart limit and exponential
   backoff, or `Stop`.
-- **Bounded or unbounded mailboxes**: bounded ones drop messages beyond capacity as dead letters
-  but never drop terminated signals.
+- **Bounded or unbounded mailboxes**: bounded ones drop messages beyond capacity as dead letters but
+  never drop terminated signals, the outputs of piped futures or `reply_to` replies.
 - **Event-sourced persistence** (feature `persistence`): events are appended to a pluggable store
   and only then applied, the state is recovered by replay, and conditional appends fence
   concurrent incarnations.
@@ -153,11 +153,11 @@ that cannot fail). Inside `receive`, use `?` to escalate a failure to supervisio
 `receive` is synchronous and runs on a Tokio worker: an actor cannot be stopped while `receive` is
 running, so a `receive` which never completes keeps all its ancestors from terminating. For long
 running or blocking work, use `ActorContext::pipe_to_self`: it runs a future on its own task and
-delivers the output to the actor as an ordinary message. For a deadline, a retry or an idle timeout,
-declare `type Timers = Timed;` and use `ActorContext::start_timer`: it delivers a message to the
-actor itself once a delay has elapsed. A timer replaced under its key or canceled with
-`ActorContext::cancel_timer` is never received. An actor with `type Timers = Untimed;` has no timers
-and pays nothing for them.
+delivers the output to the actor as an ordinary message, which a full bounded mailbox does not
+refuse. For a deadline, a retry or an idle timeout, declare `type Timers = Timed;` and use
+`ActorContext::start_timer`: it delivers a message to the actor itself once a delay has elapsed. A
+timer replaced under its key or canceled with `ActorContext::cancel_timer` is never received. An
+actor with `type Timers = Untimed;` has no timers and pays nothing for them.
 
 ### The actor tree and termination
 
@@ -182,7 +182,8 @@ full, the actor has terminated or it is detected that no reply can arrive anymor
 is best-effort, so every ask carries a timeout which resolves the future at the latest when it
 elapses. Between actors, `ActorContext::reply_to` creates a `ReplyTo` which delivers the reply
 into the asking actor's own mailbox, converted into its message type, so the reply arrives through
-`receive` like any other message.
+`receive` like any other message. A full bounded mailbox does not refuse that reply. A missing reply
+is never reported, so an actor which must detect one starts a timer per request.
 
 ### Watch
 

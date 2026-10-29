@@ -58,7 +58,14 @@ pub enum MailboxCapacity {
     #[default]
     Unbounded,
 
-    /// Messages sent to a full mailbox are dropped and logged as dead letters.
+    /// Messages sent to a full mailbox are dropped and logged as dead letters. A full mailbox still
+    /// takes terminated signals, the outputs of futures piped with [ActorContext::pipe_to_self],
+    /// the replies to destinations from [ActorContext::reply_to] and what a [Host] buffered for it,
+    /// so it can exceed its capacity by those.
+    ///
+    /// [ActorContext::pipe_to_self]: crate::ActorContext::pipe_to_self
+    /// [ActorContext::reply_to]: crate::ActorContext::reply_to
+    /// [Host]: crate::Host
     Bounded(NonZeroUsize),
 }
 
