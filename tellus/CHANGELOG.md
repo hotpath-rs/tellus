@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/tellus-rs/tellus/compare/tellus-v0.5.0...tellus-v0.5.1) - 2026-10-29
+
+### Added
+
+- deliver a reply_to reply past a full mailbox
+
+### Fixed
+
+- deliver a piped future's output past a full mailbox
+
+### Other
+
+- Merge pull request #179 from hotpath-rs/callgrind_mode
+- Use callgrind merged mode for hotpath benchmarks
+- *(deps)* bump the cargo-major group across 1 directory with 3 updates
+
 ## [0.5.0](https://github.com/tellus-rs/tellus/compare/tellus-v0.4.0...tellus-v0.5.0) - 2026-10-28
 
 ### Added
