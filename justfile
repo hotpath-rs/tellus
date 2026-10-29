@@ -16,7 +16,7 @@ bench_regression_threshold := "0.15"
 # that also drops `persistence-tests,persistence-in-memory`, the one combination which compiles
 # tests/persistence_tests.rs. Implications need no group anyway, since cargo-hack drops a
 # combination whose features resolve to the same set.
-powerset := "--feature-powerset --exclude-features hotpath,hotpath-alloc,hotpath-cloud"
+powerset := "--feature-powerset --exclude-features hotpath,hotpath-alloc,hotpath-callgrind,hotpath-cloud"
 
 check:
     cargo hack check -p tellus                      --all-targets {{ powerset }}

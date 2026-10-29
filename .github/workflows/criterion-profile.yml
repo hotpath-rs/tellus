@@ -1,0 +1,189 @@
+name: Criterion profile
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: criterion-profile-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  TOOLCHAIN: "1.99.0"
+  VALGRIND_VERSION: "3.26.0"
+
+jobs:
+  upload:
+    name: Criterion profile ${{ matrix.benchmark }} (upload)
+    if: github.event_name == 'push'
+    # Instruction counts only compare within one Valgrind build and Rust toolchain, so the image,
+    # the package and the toolchain are pinned.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - benchmark: criterion-flood-bounded
+            bench: messaging
+            id: flood/bounded
+            iterations: 10
+            features: ""
+          - benchmark: criterion-ping_pong-pairs-1
+            bench: messaging
+            id: ping_pong/pairs/1
+            iterations: 100
+            features: ""
+          - benchmark: criterion-persist-snapshots
+            bench: persistence
+            id: persist/snapshots
+            iterations: 10
+            features: ",persistence,persistence-in-memory"
+    env:
+      HOTPATH_BENCHMARK: ${{ matrix.benchmark }}
+      HOTPATH_CRITERION_ITERATIONS: ${{ matrix.iterations }}
+      HOTPATH_USER_METADATA: runner=Linux-X64,toolchain=1.99.0,profile=release,valgrind=3.26.0
+      HOTPATH_OUTPUT_FORMAT: json
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.TOOLCHAIN }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "valgrind=1:${VALGRIND_VERSION}-0ubuntu1"
+          valgrind --version
+
+      - name: Build benchmark
+        id: build
+        run: |
+          bin=$(cargo build -q --release -p tellus --bench ${{ matrix.bench }} \
+            --features "hotpath-alloc,hotpath-cloud,hotpath-callgrind${{ matrix.features }}" --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | index("bench"))) | .executable')
+          test -x "$bin"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+
+      - name: Run benchmark natively
+        env:
+          HOTPATH_OUTPUT_PATH: ${{ runner.temp }}/native.json
+        run: ${{ steps.build.outputs.bin }} --bench --test --exact "${{ matrix.id }}"
+
+      - name: Run benchmark under Callgrind and upload the merged report
+        env:
+          HOTPATH_UPLOAD: fail-on-error
+          HOTPATH_UPLOAD_RESPONSE_PATH: ${{ github.workspace }}/upload.json
+          HOTPATH_OUTPUT_PATH: ${{ runner.temp }}/merged.json
+          HOTPATH_MERGE_REPORT: ${{ runner.temp }}/native.json
+          HOTPATH_CALLGRIND_OUT_FILE: ${{ runner.temp }}/callgrind.out.%p
+        run: |
+          valgrind -q --tool=callgrind --instr-atstart=no \
+            --callgrind-out-file="$HOTPATH_CALLGRIND_OUT_FILE" \
+            ${{ steps.build.outputs.bin }} --bench --test --exact "${{ matrix.id }}"
+          test -s "$HOTPATH_UPLOAD_RESPONSE_PATH"
+          jq -e --arg id "${{ matrix.id }}" \
+            '.meta.run == "merged" and (.functions_icount.data | length > 0) and (.functions_timing.data | length > 0) and .user_metadata.criterion_benchmark == $id' \
+            "$HOTPATH_OUTPUT_PATH" > /dev/null
+
+  report:
+    name: Criterion profile ${{ matrix.benchmark }}
+    if: github.event_name == 'pull_request'
+    # Instruction counts only compare within one Valgrind build and Rust toolchain, so the image,
+    # the package and the toolchain are pinned.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - benchmark: criterion-flood-bounded
+            bench: messaging
+            id: flood/bounded
+            iterations: 10
+            features: ""
+          - benchmark: criterion-ping_pong-pairs-1
+            bench: messaging
+            id: ping_pong/pairs/1
+            iterations: 100
+            features: ""
+          - benchmark: criterion-persist-snapshots
+            bench: persistence
+            id: persist/snapshots
+            iterations: 10
+            features: ",persistence,persistence-in-memory"
+    env:
+      HOTPATH_BENCHMARK: ${{ matrix.benchmark }}
+      HOTPATH_CRITERION_ITERATIONS: ${{ matrix.iterations }}
+      HOTPATH_USER_METADATA: runner=Linux-X64,toolchain=1.99.0,profile=release,valgrind=3.26.0
+      HOTPATH_OUTPUT_FORMAT: json
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.TOOLCHAIN }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "valgrind=1:${VALGRIND_VERSION}-0ubuntu1"
+          valgrind --version
+
+      - name: Build benchmark
+        id: build
+        run: |
+          bin=$(cargo build -q --release -p tellus --bench ${{ matrix.bench }} \
+            --features "hotpath-alloc,hotpath-cloud,hotpath-callgrind${{ matrix.features }}" --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | index("bench"))) | .executable')
+          test -x "$bin"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+
+      - name: Run benchmark natively
+        env:
+          HOTPATH_OUTPUT_PATH: ${{ runner.temp }}/native.json
+        run: ${{ steps.build.outputs.bin }} --bench --test --exact "${{ matrix.id }}"
+
+      - name: Run benchmark under Callgrind and write the merged report
+        env:
+          HOTPATH_OUTPUT_PATH: report.json
+          HOTPATH_MERGE_REPORT: ${{ runner.temp }}/native.json
+          HOTPATH_CALLGRIND_OUT_FILE: ${{ runner.temp }}/callgrind.out.%p
+        run: |
+          valgrind -q --tool=callgrind --instr-atstart=no \
+            --callgrind-out-file="$HOTPATH_CALLGRIND_OUT_FILE" \
+            ${{ steps.build.outputs.bin }} --bench --test --exact "${{ matrix.id }}"
+          test -s report.json
+          jq -e --arg id "${{ matrix.id }}" \
+            '.meta.run == "merged" and (.functions_icount.data | length > 0) and (.functions_timing.data | length > 0) and .user_metadata.criterion_benchmark == $id' \
+            report.json > /dev/null
+
+      - name: Store report for the relay
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hotpath-report-${{ matrix.benchmark }}
+          path: report.json
+          retention-days: 1
+          if-no-files-found: error
