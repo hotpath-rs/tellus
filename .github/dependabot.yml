@@ -27,7 +27,9 @@ updates:
           - "*"
 
   - package-ecosystem: docker-compose
-    directory: "/"
+    directories:
+      - "/"
+      - "/tellus-cluster-demo"
     schedule:
       interval: weekly
     cooldown:
@@ -47,6 +49,34 @@ updates:
         patterns:
           - "*"
       docker-compose-major:
+        update-types:
+          - major
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directories:
+      - "/tellus-cluster-demo"
+      - "/tellus-cluster-demo/k8s"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      docker-patch:
+        update-types:
+          - patch
+        patterns:
+          - "*"
+      docker-minor:
+        update-types:
+          - minor
+        patterns:
+          - "*"
+      docker-major:
         update-types:
           - major
         patterns:
