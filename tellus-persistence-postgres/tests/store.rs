@@ -172,7 +172,7 @@ async fn store() -> (PostgresStore, ContainerAsync<Postgres>) {
         .with_db_name(dbname)
         .with_user(user)
         .with_password(password)
-        .with_tag(postgres.image().tag())
+        .with_tag(postgres.image().tag_with_digest())
         .start()
         .await
         .expect("the PostgreSQL container starts");
