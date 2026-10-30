@@ -86,7 +86,7 @@ both are built with those features off:
 - `ractor`: `default-features = false, features = ["tokio_runtime"]`, dropping
   `message_span_propogation`. Measured **21% faster** than with defaults on `flood`.
 
-This deliberately biases the setup *in the competitors' favour*, which is the appropriate
+This deliberately biases the setup *in the competitors' favor*, which is the appropriate
 direction for a comparison published by tellus's own maintainer. Anyone reproducing the
 out-of-the-box experience should expect both to be correspondingly slower.
 
@@ -98,7 +98,7 @@ folding the speed configuration above into it; keep both in sync with
 
 1. **tellus's `receive` is synchronous; kameo's and ractor's handlers are `async fn`.** tellus
    therefore avoids allocating and polling a future per message, but in exchange it cannot await
-   inside `receive`. This is a capability difference, not only a speed difference, and it favours
+   inside `receive`. This is a capability difference, not only a speed difference, and it favors
    tellus on exactly these microbenchmarks.
 2. **tellus's mailbox is statically typed; the others erase message types.** kameo and ractor box
    messages to support their richer messaging APIs, which costs an allocation and a dynamic

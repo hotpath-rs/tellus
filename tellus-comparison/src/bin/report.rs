@@ -12,6 +12,7 @@ use std::{
 
 const PACKAGES: [&str; 3] = ["kameo", "ractor", "tellus"];
 const LATEST: &str = "latest";
+const COMPARISON_URL: &str = "https://tellus.rs/tellus/comparison/";
 const HEADER: &str = r#"<header class="top"><div class="wrap">
 <a class="brand" href="https://tellus.rs/" aria-label="tellus home"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M2.33 13h27.35" stroke="currentColor" stroke-width="2.5"/><path d="M2.44 19.5h27.11M5.45 25.2h21.11" stroke="var(--accent)" stroke-width="2.5"/><circle cx="16" cy="16" r="14" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>tellus</a>
 <nav class="nav" aria-label="Main"><a href="https://tellus.rs/docs/">Docs</a><a href="https://tellus.rs/tellus/comparison/" aria-current="page">Comparison</a><a href="https://tellus.rs/tellus/dev/bench/">Regression benchmarks</a><a href="https://github.com/tellus-rs/tellus">GitHub</a></nav>
@@ -185,18 +186,28 @@ fn write_index(directory: &Path) -> anyhow::Result<()> {
         })
         .collect::<String>();
 
+    let description =
+        "Messaging throughput of tellus against kameo and ractor, one run per release.";
     let body = format!(
         r#"<p class="eyebrow">Benchmarks</p>
 <h1>tellus comparison benchmarks</h1>
-<p class="lede">Messaging throughput of tellus against kameo and ractor, one run per release.</p>
+<p class="lede">{description}</p>
 <ul class="runs">{latest_item}{items}</ul>
 <div class="foot"><span>See the <a href="../dev/bench/">regression benchmarks</a> for tellus's own throughput over time.</span></div>
 "#
     );
 
     let path = directory.join("index.html");
-    fs::write(&path, page("tellus comparison benchmarks", &body))
-        .with_context(|| format!("writing {}", path.display()))
+    fs::write(
+        &path,
+        page(
+            "tellus comparison benchmarks",
+            description,
+            COMPARISON_URL,
+            &body,
+        ),
+    )
+    .with_context(|| format!("writing {}", path.display()))
 }
 
 fn read_report(path: &Path) -> anyhow::Result<Report> {
@@ -461,12 +472,12 @@ fn render_html(report: &Report) -> String {
 <ol>
 <li><strong>tellus's <code>receive</code> is synchronous; kameo's and ractor's handlers are <code>async fn</code>.</strong>
 tellus therefore avoids allocating and polling a future per message, but cannot await inside <code>receive</code>.
-This is a capability difference, not only a speed difference, and it favours tellus on exactly these microbenchmarks.</li>
+This is a capability difference, not only a speed difference, and it favors tellus on exactly these microbenchmarks.</li>
 <li><strong>tellus's mailbox is statically typed; the others erase message types</strong>, costing an allocation
 and a dynamic dispatch per message that tellus does not pay.</li>
 <li><strong>Competitors are configured for speed, not defaults.</strong> kameo runs without <code>tracing</code>
 and ractor without <code>message_span_propogation</code>, both of which add per-message instrumentation that
-tellus has no equivalent of. This biases the setup in the competitors' favour.</li>
+tellus has no equivalent of. This biases the setup in the competitors' favor.</li>
 <li><strong>Messaging microbenchmarks only.</strong> Nothing here speaks to supervision, distribution,
 ergonomics, memory use or production readiness. kameo and ractor are mature, feature-rich frameworks; tellus is
 under active development and does far less.</li>
@@ -493,6 +504,11 @@ repository; corrections are welcome.</li>
 
     page(
         &format!("tellus comparison benchmarks ({})", escape(&metadata.tag)),
+        &format!(
+            "Messaging throughput of tellus against kameo and ractor for {}, with the methodology and its caveats.",
+            escape(&metadata.tag)
+        ),
+        &format!("{COMPARISON_URL}{LATEST}/"),
         &body,
     )
 }
@@ -543,7 +559,7 @@ fn render_section(group: &str, parameter: Option<&str>, measurements: &[Measurem
     )
 }
 
-fn page(title: &str, body: &str) -> String {
+fn page(title: &str, description: &str, canonical: &str, body: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -551,6 +567,8 @@ fn page(title: &str, body: &str) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
+<meta name="description" content="{description}">
+<link rel="canonical" href="{canonical}">
 <link rel="icon" href="https://tellus.rs/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://tellus.rs/dashboards.css">
 </head>
