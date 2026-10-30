@@ -27,7 +27,7 @@ flume                  = { version = "0.12", default-features = false }
 futures-util           = { version = "0.3" }
 hickory-resolver       = { version = "0.26" }
 hickory-server         = { version = "0.26" }
-hotpath                = { git = "https://github.com/hotpath-rs/hotpath", rev = "3900efe0bdb0031b5603cf7441ec2d4afc9b454c" }
+hotpath                = { git = "https://github.com/hotpath-rs/hotpath", rev = "700bf507226bd2f0e397a4ea949c1aeb2b4114ee" }
 http                   = { version = "1.5" }
 http-body-util         = { version = "0.1" }
 humantime-serde        = { version = "1.1" }

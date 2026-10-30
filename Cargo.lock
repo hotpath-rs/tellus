@@ -1772,8 +1772,8 @@ dependencies = [
 
 [[package]]
 name = "hotpath"
-version = "0.30.0"
-source = "git+https://github.com/hotpath-rs/hotpath?rev=3900efe0bdb0031b5603cf7441ec2d4afc9b454c#3900efe0bdb0031b5603cf7441ec2d4afc9b454c"
+version = "0.30.1"
+source = "git+https://github.com/hotpath-rs/hotpath?rev=700bf507226bd2f0e397a4ea949c1aeb2b4114ee#700bf507226bd2f0e397a4ea949c1aeb2b4114ee"
 dependencies = [
  "arc-swap",
  "cfg-if",
@@ -1797,13 +1797,13 @@ dependencies = [
 
 [[package]]
 name = "hotpath-drain"
-version = "0.30.0"
-source = "git+https://github.com/hotpath-rs/hotpath?rev=3900efe0bdb0031b5603cf7441ec2d4afc9b454c#3900efe0bdb0031b5603cf7441ec2d4afc9b454c"
+version = "0.30.1"
+source = "git+https://github.com/hotpath-rs/hotpath?rev=700bf507226bd2f0e397a4ea949c1aeb2b4114ee#700bf507226bd2f0e397a4ea949c1aeb2b4114ee"
 
 [[package]]
 name = "hotpath-macros"
-version = "0.30.0"
-source = "git+https://github.com/hotpath-rs/hotpath?rev=3900efe0bdb0031b5603cf7441ec2d4afc9b454c#3900efe0bdb0031b5603cf7441ec2d4afc9b454c"
+version = "0.30.1"
+source = "git+https://github.com/hotpath-rs/hotpath?rev=700bf507226bd2f0e397a4ea949c1aeb2b4114ee#700bf507226bd2f0e397a4ea949c1aeb2b4114ee"
 dependencies = [
  "proc-macro2",
  "quote",

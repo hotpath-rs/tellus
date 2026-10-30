@@ -5,33 +5,40 @@ on:
     workflows: ["Profile", "Criterion profile"]
     types: [completed]
 
+permissions: {}
+
 jobs:
   relay-profile:
-    if: github.event.workflow_run.name == 'Profile'
-    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@9b238fa84222efde573f29eb4bae76dcb5f700c0 # v0.28.6
+    if: >-
+      github.event.workflow_run.name == 'Profile' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        benchmark:
+          - profile
+          - profile_persistence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       actions: read
       id-token: write
       pull-requests: read
-    with:
-      benchmark: profile
-      artifact_name: hotpath-report-profile
-      report_file: report.json
-
-  relay-profile-persistence:
-    if: github.event.workflow_run.name == 'Profile'
-    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@9b238fa84222efde573f29eb4bae76dcb5f700c0 # v0.28.6
-    permissions:
-      actions: read
-      id-token: write
-      pull-requests: read
-    with:
-      benchmark: profile_persistence
-      artifact_name: hotpath-report-profile_persistence
-      report_file: report.json
+    concurrency:
+      group: hotpath-relay-${{ matrix.benchmark }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: true
+    steps:
+      - uses: hotpath-rs/hotpath-relay@v1.0.0
+        with:
+          benchmark: ${{ matrix.benchmark }}
+          artifact_name: hotpath-report-${{ matrix.benchmark }}
 
   relay-criterion:
-    if: github.event.workflow_run.name == 'Criterion profile'
+    if: >-
+      github.event.workflow_run.name == 'Criterion profile' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -39,12 +46,17 @@ jobs:
           - criterion-flood-bounded
           - criterion-ping_pong-pairs-1
           - criterion-persist-snapshots
-    uses: hotpath-rs/hotpath/.github/workflows/hotpath-relay.yml@6611490c8b1b33b69c4845e86daa450a50f461c6 # v0.30.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       actions: read
       id-token: write
       pull-requests: read
-    with:
-      benchmark: ${{ matrix.benchmark }}
-      artifact_name: hotpath-report-${{ matrix.benchmark }}
-      report_file: report.json
+    concurrency:
+      group: hotpath-relay-${{ matrix.benchmark }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: true
+    steps:
+      - uses: hotpath-rs/hotpath-relay@v1.0.0
+        with:
+          benchmark: ${{ matrix.benchmark }}
+          artifact_name: hotpath-report-${{ matrix.benchmark }}
