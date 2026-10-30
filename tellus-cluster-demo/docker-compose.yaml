@@ -135,7 +135,7 @@ services:
       - lb
 
   chaos:
-    image: docker:29.7.2-cli@sha256:3f4743208d2338c934d7b8bcfbe1bb54c0b2355c510ad5e0f31c0c4a54bd704e
+    image: docker:29.9.2-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb
     container_name: tellus-demo-chaos
     entrypoint: [ "/bin/sh", "/chaos.sh" ]
     restart: unless-stopped
