@@ -2,6 +2,10 @@
 //! then drive sequential ask round trips; together they exercise every instrumented function, from
 //! the send path through the mailbox to the run loop and termination.
 //!
+//! The flood runs on a single-threaded runtime, so it is sent in full before the actor receives any
+//! of it. Every run therefore reaches the same mailbox backlog and allocates the same bytes. The
+//! ask round trips run on a multi-threaded runtime, so each one wakes the actor on another thread.
+//!
 //! Run `just profile` for a timing report or `just profile-alloc` for per-call allocations. Read
 //! the numbers as relative attribution, not absolute cost: instrumentation overhead is significant
 //! for nanosecond-scale operations, and an async function like `recv` is measured over its
@@ -13,16 +17,24 @@ use tellus::{
     Actor, ActorConfig, ActorContext, ActorSystem, Control, Incoming, MailboxCapacity, ReplyTo,
     Untimed,
 };
+use tokio::runtime;
 
 const FLOOD_MESSAGES: usize = 100_000;
 const ASK_REQUESTS: usize = 10_000;
 const ASK_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[tokio::main]
 #[cfg_attr(feature = "hotpath", hotpath::main)]
-async fn main() -> anyhow::Result<()> {
-    flood().await?;
-    ask_round_trips().await
+fn main() -> anyhow::Result<()> {
+    runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building the flood runtime")?
+        .block_on(flood())?;
+    runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building the ask runtime")?
+        .block_on(ask_round_trips())
 }
 
 async fn flood() -> anyhow::Result<()> {
